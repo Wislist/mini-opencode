@@ -35,6 +35,10 @@ You are summarizing a conversation to preserve context for continuing work later
 - Assumptions made
 - Any blockers or risks identified
 
+## User Summary
+
+Write 2-5 concise bullets that can be shown directly to the user after `/compact`. This section is a friendly progress recap, not the full handoff. Do not include raw code, diffs, command logs, long file contents, or secret values. Mention only what was preserved and what likely happens next.
+
 ## Exact Next Steps
 
 Be specific. Don't write "implement authentication" - write:
@@ -45,4 +49,6 @@ Be specific. Don't write "implement authentication" - write:
 
 **Tone**: Write as if briefing a teammate taking over mid-task. Include everything they'd need to continue without asking questions. No emojis ever.
 
-**Length**: No limit. Err on the side of too much detail rather than too little. Critical context is worth the tokens.
+**Code/output discipline**: Do not paste long verbatim code blocks, command logs, diffs, or tool outputs. Preserve the actionable facts instead: file paths, symbols, line ranges, commands, errors, decisions, and tiny snippets only when absolutely necessary.
+
+**Length**: Be complete but avoid dumping raw code or output. Critical context is worth the tokens; redundant verbatim content is not.

@@ -122,6 +122,7 @@ func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cancel()
 		}
 		m.state = stateIdle
+		m.input.Focus()
 		m.addBlock(errorStyle.Render("✗ compact interrupted"))
 		m.refreshViewport()
 		return m, textinput.Blink

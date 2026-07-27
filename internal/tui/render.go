@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/wislist/mini-opencode/internal/agent"
 )
@@ -16,9 +17,22 @@ func (m *Model) View() string {
 	if m.width == 0 {
 		return "loading..."
 	}
+
+	header := m.renderHeader()
+	footer := m.renderFooter()
+	m.fitViewport(header, footer)
+	m.updateNativeCursorPosition(header, footer)
+
+	sections := []string{header, m.viewport.View()}
+	sections = append(sections, footer...)
+	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+}
+
+// renderFooter returns every section below the transcript viewport. Keeping
+// these sections together lets fitViewport reserve their actual rendered
+// height instead of relying on a fixed subtraction that leaves stale rows.
+func (m *Model) renderFooter() []string {
 	var sections []string
-	sections = append(sections, m.renderHeader())
-	sections = append(sections, m.viewport.View())
 	if m.state == statePermission && m.pendingPerm != nil {
 		sections = append(sections, m.renderPermissionPrompt())
 	} else if m.state == stateKeyPrompt {
@@ -31,8 +45,31 @@ func (m *Model) View() string {
 		}
 		sections = append(sections, m.renderInputBar())
 	}
-	sections = append(sections, m.renderHelpBar())
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	return append(sections, m.renderHelpBar())
+}
+
+// fitViewport makes the complete view occupy the terminal height. The old
+// fixed "height - 7" viewport left two rows unmanaged in the common layout;
+// after a resize those rows could retain or wrap a previous help bar, making
+// the command hints appear twice.
+func (m *Model) fitViewport(header string, footer []string) {
+	if m.height <= 0 {
+		return
+	}
+	height := m.height - lipgloss.Height(header)
+	for _, section := range footer {
+		height -= lipgloss.Height(section)
+	}
+	height = max(1, height)
+	if m.viewport.Height == height {
+		return
+	}
+
+	wasAtBottom := m.viewport.AtBottom()
+	m.viewport.Height = height
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *Model) renderHeader() string {
@@ -77,66 +114,28 @@ func boxWidth(m *Model) int {
 	return max(1, m.width-2)
 }
 
-// wordWrap wraps plain (unstyled) text to the given rune width, breaking at
-// word boundaries when possible and hard-breaking over-long words. Existing
-// newlines are preserved as paragraph breaks.
+// wordWrap wraps text to a terminal cell width, preserving ANSI styles and
+// existing newlines. Terminal cells matter here: CJK characters and emoji can
+// occupy two columns even though they are a single rune.
 func wordWrap(text string, width int) string {
 	if width <= 0 {
 		return text
 	}
 	var out []string
 	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimRight(line, " \t")
-		if lipgloss.Width(line) <= width {
-			out = append(out, line)
-			continue
-		}
-		out = append(out, wrapLine(line, width)...)
+		out = append(out, wrapLine(strings.TrimRight(line, " \t"), width)...)
 	}
 	return strings.Join(out, "\n")
 }
 
-// wrapLine wraps a single line (no embedded newlines) to width runes.
+// wrapLine wraps a single line (no embedded newlines) by grapheme display
+// width. ansi.Wrap also keeps escape sequences intact when styled strings are
+// passed by status, session, or tool renderers.
 func wrapLine(line string, width int) []string {
-	words := strings.Fields(line)
-	if len(words) == 0 {
+	if line == "" {
 		return []string{""}
 	}
-	var lines []string
-	var cur strings.Builder
-	curW := 0
-	for _, w := range words {
-		ww := lipgloss.Width(w)
-		if curW == 0 {
-			if ww <= width {
-				cur.WriteString(w)
-				curW = ww
-				continue
-			}
-		} else if curW+1+ww <= width {
-			cur.WriteByte(' ')
-			cur.WriteString(w)
-			curW += 1 + ww
-			continue
-		}
-		// flush current line, then place the word on a fresh one
-		if curW > 0 {
-			lines = append(lines, cur.String())
-			cur.Reset()
-			curW = 0
-		}
-		runes := []rune(w)
-		for len(runes) > width {
-			lines = append(lines, string(runes[:width]))
-			runes = runes[width:]
-		}
-		cur.WriteString(string(runes))
-		curW = len(runes)
-	}
-	if cur.Len() > 0 {
-		lines = append(lines, cur.String())
-	}
-	return lines
+	return strings.Split(ansi.GraphemeWidth.Wrap(line, width, " "), "\n")
 }
 
 // renderGitSegment renders the branch and dirty-file counts for the header.
@@ -231,8 +230,8 @@ func (m *Model) renderUserMessage(text string) string {
 
 func (m *Model) renderAssistantMessage(text string) string {
 	contentWidth := max(1, m.width-2)
-	wrapped := wordWrap(text, contentWidth-2) // -2 for the left padding
-	return assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" + assistantText.Width(contentWidth).Render(wrapped)
+	rendered := renderAssistantMarkdown(text, max(1, contentWidth-2)) // -2 for the left padding
+	return assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" + assistantText.Width(contentWidth).Render(rendered)
 }
 
 func (m *Model) renderToolCall(call *agent.ToolCall) string {

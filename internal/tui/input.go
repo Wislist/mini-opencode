@@ -188,9 +188,11 @@ func (m *Model) startCompact() (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
+	before := len(m.runtime.Messages())
+	m.saveCurrentSession()
 	m.state = stateCompacting
 	m.input.Blur()
-	m.addBlock(dimStyle.Render("compacting context..."))
+	m.addBlock(dimStyle.Render(fmt.Sprintf("compacting context (%d messages)...", before)))
 	m.refreshViewport()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -198,8 +200,8 @@ func (m *Model) startCompact() (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 
 	go func() {
-		summary, err := m.compactor(ctx)
-		m.program.Send(compactDoneMsg{summary: summary, err: err})
+		result, err := m.compactor(ctx)
+		m.program.Send(compactDoneMsg{before: before, userSummary: result.UserSummary, err: err})
 	}()
 
 	return m, spinner.Tick

@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -56,12 +58,14 @@ type permissionRequestMsg struct {
 	resp   chan bool
 }
 type compactDoneMsg struct {
-	summary string
-	err     error
+	before      int
+	userSummary string
+	err         error
 }
 
 // Callbacks the TUI needs from app.go.
 type KeySaver func(key string) (config.Config, error)
+
 // NameSaver persists custom user/assistant display names and returns the
 // updated config.
 type NameSaver func(user, assistant string) (config.Config, error)
@@ -85,8 +89,8 @@ type Model struct {
 	height int
 	// streamingIdx is the index in blocks of the currently streaming
 	// assistant message; -1 when not streaming.
-	streamingIdx    int
-	streamingText   string
+	streamingIdx  int
+	streamingText string
 
 	gitStatus GitStatus
 
@@ -109,11 +113,16 @@ type Model struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	nativeCursorMu  sync.RWMutex
+	nativeCursorCol int
+	nativeCursorRow int
+	nativeCursorOK  bool
 }
 
 // Compactor summarizes the current conversation context. It returns the
-// generated summary text.
-type Compactor func(ctx context.Context) (string, error)
+// generated compact result, including a short user-facing summary.
+type Compactor func(ctx context.Context) (agent.CompactResult, error)
 
 func New(cfg *config.Config, workingDir, ver string) *Model {
 	vp := viewport.New(80, 20)
@@ -134,16 +143,16 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 	ki.CharLimit = 0
 
 	return &Model{
-		viewport:   vp,
-		input:      ti,
-		spinner:    sp,
-		keyInput:   ki,
-		state:      stateIdle,
+		viewport:     vp,
+		input:        ti,
+		spinner:      sp,
+		keyInput:     ki,
+		state:        stateIdle,
 		streamingIdx: -1,
-		cfg:        cfg,
-		workingDir: workingDir,
-		version:    ver,
-		mode:       ModeCode,
+		cfg:          cfg,
+		workingDir:   workingDir,
+		version:      ver,
+		mode:         ModeCode,
 	}
 }
 
@@ -203,14 +212,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
+		// Never render into the terminal's final cell. Many terminals wrap as
+		// soon as that cell is written; one physical wrap can scroll the whole
+		// alternate screen and expose rows from the previous conversation.
+		m.width = max(1, msg.Width-1)
 		m.height = msg.Height
-		m.viewport.Width = msg.Width
-		m.viewport.Height = max(1, msg.Height-7)
-		// Constrain the textinput so typed text wraps within the bordered
+		m.viewport.Width = m.width
+		m.viewport.Height = max(1, msg.Height-5)
+		// Reserve the common header + input box + help bar layout. View()
+		// recalculates this from the actual footer for menus and prompts.
+		// Constrain the textinput so typed text stays within the bordered
 		// input bar (border 2 + padding 2 + prompt glyph 2 = 6).
-		m.input.Width = max(1, msg.Width-6)
-		m.keyInput.Width = max(1, msg.Width-6)
+		m.input.Width = max(1, m.width-6)
+		m.keyInput.Width = max(1, m.width-6)
 		m.refreshViewport()
 		return m, nil
 
@@ -239,9 +253,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateIdle
 		if msg.err != nil {
 			m.addBlock(errorStyle.Render("✗ compact: " + msg.err.Error()))
-		} else if msg.summary != "" {
-			m.addBlock(toolArrow.Render("⟳ context compacted"))
-			m.addBlock(dimStyle.Render(msg.summary))
+		} else {
+			m.addBlock(toolArrow.Render(fmt.Sprintf("⟳ context compacted: %d messages -> 1", msg.before)))
+			if strings.TrimSpace(msg.userSummary) != "" {
+				m.addBlock(m.renderAssistantMessage(msg.userSummary))
+			} else {
+				m.addBlock(dimStyle.Render("summary saved internally"))
+			}
+			m.saveCurrentSession()
 		}
 		m.gitStatus = collectGitStatus(m.workingDir)
 		m.refreshViewport()

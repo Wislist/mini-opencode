@@ -75,8 +75,11 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		case "/skills":
 			printSkills(out, workingDir)
 		case "/compact":
+			saveSession(sessions, currentSession, runtime)
 			if err := runCompact(ctx, out, workingDir, runtime); err != nil {
 				fmt.Fprintf(out, "error: %v\n", err)
+			} else {
+				saveSession(sessions, currentSession, runtime)
 			}
 		case "/newsession":
 			saveSession(sessions, currentSession, runtime)
@@ -210,7 +213,7 @@ func saveSession(store *session.Store, sess *session.Session, rt *agent.Runtime)
 	sess.Messages = msgs
 	if sess.Title == "new session" {
 		for _, msg := range msgs {
-			if msg.Role == agent.RoleUser {
+			if msg.Role == agent.RoleUser && !strings.Contains(msg.Content, "<conversation_summary>") {
 				sess.Title = session.TitleFromMessage(msg.Content)
 				break
 			}
@@ -230,12 +233,16 @@ func runCompact(ctx context.Context, out io.Writer, workingDir string, runtime *
 		return err
 	}
 	fmt.Fprintln(out, "[compacting context...]")
-	summary, err := runtime.Compact(ctx, summaryPrompt)
+	result, err := runtime.CompactDetailed(ctx, summaryPrompt)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "[context compacted: %d messages -> 1]\n", before)
-	fmt.Fprintln(out, summary)
+	if strings.TrimSpace(result.UserSummary) != "" {
+		fmt.Fprintln(out, result.UserSummary)
+	} else {
+		fmt.Fprintln(out, "[summary saved internally]")
+	}
 	return nil
 }
 

@@ -126,31 +126,95 @@ func (r *Runtime) toolDefinition(name string) ToolDefinition {
 	return def
 }
 
+// CompactResult contains both the full internal summary saved into context and
+// a short user-facing summary safe to show in the transcript.
+type CompactResult struct {
+	Summary     string
+	UserSummary string
+}
+
 // Compact asks the provider to summarize the current conversation and replaces
 // the message history with a single summary message. The summaryPrompt is the
 // instruction prompt (e.g. from the summary template) describing how to summarize.
 // It returns the generated summary text.
 func (r *Runtime) Compact(ctx context.Context, summaryPrompt string) (string, error) {
+	result, err := r.CompactDetailed(ctx, summaryPrompt)
+	return result.Summary, err
+}
+
+// CompactDetailed is like Compact, but also returns the prompt-requested
+// user-facing summary section so the UI can acknowledge what was preserved
+// without dumping the full compacted context.
+func (r *Runtime) CompactDetailed(ctx context.Context, summaryPrompt string) (CompactResult, error) {
 	if len(r.messages) == 0 {
-		return "", nil
+		return CompactResult{}, nil
 	}
 	resp, err := r.provider.Complete(ctx, Request{
 		SystemPrompt: summaryPrompt,
 		Messages:     r.Messages(),
 	})
 	if err != nil {
-		return "", err
+		return CompactResult{}, err
 	}
 	summary := strings.TrimSpace(resp.Content)
 	if summary == "" {
-		return "", fmt.Errorf("provider returned empty summary")
+		return CompactResult{}, fmt.Errorf("provider returned empty summary")
 	}
 	r.messages = []Message{{
 		Role: RoleUser,
 		Content: "<conversation_summary>\n" + summary +
 			"\n</conversation_summary>\n\nThe above summarizes our previous conversation. Continue from this context.",
 	}}
-	return summary, nil
+	return CompactResult{Summary: summary, UserSummary: extractCompactUserSummary(summary)}, nil
+}
+
+func extractCompactUserSummary(summary string) string {
+	lines := strings.Split(summary, "\n")
+	start := -1
+	for i, line := range lines {
+		if isUserSummaryHeading(line) {
+			start = i + 1
+			break
+		}
+	}
+	if start == -1 {
+		return "Context compacted. Detailed summary saved internally."
+	}
+
+	var out []string
+	inCodeFence := false
+	for _, line := range lines[start:] {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeFence = !inCodeFence
+			continue
+		}
+		if !inCodeFence && isMarkdownHeading(trimmed) {
+			break
+		}
+		if inCodeFence {
+			continue
+		}
+		out = append(out, strings.TrimRight(line, " \t"))
+	}
+	userSummary := strings.TrimSpace(strings.Join(out, "\n"))
+	if userSummary == "" {
+		return "Context compacted. Detailed summary saved internally."
+	}
+	return userSummary
+}
+
+func isMarkdownHeading(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "# ") || strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ") || strings.HasPrefix(line, "#### ") || strings.HasPrefix(line, "##### ") || strings.HasPrefix(line, "###### ")
+}
+
+func isUserSummaryHeading(line string) bool {
+	heading := strings.ToLower(strings.TrimSpace(line))
+	heading = strings.TrimLeft(heading, "# ")
+	heading = strings.TrimSpace(strings.Trim(heading, ":"))
+	heading = strings.ReplaceAll(heading, "-", " ")
+	return heading == "user summary" || heading == "user facing summary" || heading == "user visible summary"
 }
 
 func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error {
@@ -266,7 +330,9 @@ func (r *Runtime) runApprovedTool(ctx context.Context, turn int, call ToolCall, 
 	for toolEvent := range events {
 		switch toolEvent.Type {
 		case ToolEventStarted:
-			emit(Event{Type: EventToolCallStarted, Turn: turn, ToolCall: &call})
+			// The initial permission-check run already emitted started. Emitting
+			// it again after approval renders the same tool prompt twice.
+			continue
 		case ToolEventFinished:
 			r.recordToolResult(toolEvent.Result)
 			emit(Event{Type: EventToolCallFinished, Turn: turn, ToolCall: &call, ToolResult: toolEvent.Result})

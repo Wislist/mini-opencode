@@ -164,6 +164,41 @@ func TestRuntimeExecutesToolAfterPermissionConfirmation(t *testing.T) {
 	}
 }
 
+func TestRuntimeEmitsSingleToolStartAfterPermissionConfirmation(t *testing.T) {
+	provider := &scriptedProvider{
+		responses: []AssistantResponse{
+			{
+				Content: "using tool",
+				ToolCalls: []ToolCall{{
+					ID:        "call-1",
+					Name:      "write_like",
+					Arguments: json.RawMessage(`{"path":"file.txt"}`),
+				}},
+			},
+			{Content: "finished"},
+		},
+	}
+	runtime := NewRuntime(
+		provider,
+		WithTool(permissionTestTool{}),
+		WithPermissionPolicy(NewDefaultPermissionPolicy(t.TempDir())),
+		WithPermissionConfirmer(func(ctx context.Context, call ToolCall, result ToolResult) bool { return true }),
+	)
+
+	started := 0
+	err := runtime.Run(context.Background(), "start", func(event Event) {
+		if event.Type == EventToolCallStarted {
+			started++
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if started != 1 {
+		t.Fatalf("tool started events = %d, want 1", started)
+	}
+}
+
 func hasEvent(events []EventType, want EventType) bool {
 	for _, event := range events {
 		if event == want {
@@ -214,6 +249,41 @@ func TestRuntimeCompactSummarizesAndReplacesMessages(t *testing.T) {
 	}
 	if !strings.Contains(after[0].Content, "<conversation_summary>") {
 		t.Fatalf("after compact content missing summary tags: %q", after[0].Content)
+	}
+}
+
+func TestRuntimeCompactDetailedReturnsUserSummarySection(t *testing.T) {
+	provider := &scriptedProvider{
+		responses: []AssistantResponse{{Content: strings.Join([]string{
+			"## Current State",
+			"Internal handoff details are preserved here.",
+			"## User Summary",
+			"- 已保留当前 /compact 修改进度。",
+			"- 接下来会继续验证 compact 后的显示行为。",
+			"```go",
+			"fmt.Println(\"do not show\")",
+			"```",
+			"## Exact Next Steps",
+			"1. Run tests.",
+		}, "\n")}},
+	}
+	runtime := NewRuntime(provider)
+	runtime.SetMessages([]Message{{Role: RoleUser, Content: "请修改 /compact"}})
+
+	result, err := runtime.CompactDetailed(context.Background(), "summarize")
+	if err != nil {
+		t.Fatalf("CompactDetailed() error = %v", err)
+	}
+	if !strings.Contains(result.Summary, "Internal handoff details") {
+		t.Fatalf("full summary not preserved: %q", result.Summary)
+	}
+	if !strings.Contains(result.UserSummary, "已保留当前 /compact 修改进度") {
+		t.Fatalf("user summary missing expected bullet: %q", result.UserSummary)
+	}
+	for _, unwanted := range []string{"do not show", "Exact Next Steps"} {
+		if strings.Contains(result.UserSummary, unwanted) {
+			t.Fatalf("user summary leaked %q: %q", unwanted, result.UserSummary)
+		}
 	}
 }
 

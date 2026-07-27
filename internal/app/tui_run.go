@@ -17,6 +17,13 @@ import (
 	"github.com/wislist/mini-opencode/internal/tui"
 )
 
+const (
+	// Xterm alternate-scroll mode. In the alternate screen, wheel events are sent
+	// as cursor up/down keys instead of scrolling the terminal's main scrollback.
+	enableAlternateScrollMode  = "\x1b[?1007h"
+	disableAlternateScrollMode = "\x1b[?1007l"
+)
+
 // RunTUI launches the Bubble Tea full-screen interface.
 func RunTUI(ctx context.Context) error {
 	workingDir, err := os.Getwd()
@@ -44,15 +51,15 @@ func RunTUI(ctx context.Context) error {
 	model.SetRuntimeFactory(func(newCfg config.Config) (*agent.Runtime, error) {
 		return newTUIRuntime(workingDir, newCfg, model)
 	})
-	model.SetCompactor(func(ctx context.Context) (string, error) {
+	model.SetCompactor(func(ctx context.Context) (agent.CompactResult, error) {
 		summaryPrompt, err := prompt.SummarySystemPrompt(workingDir)
 		if err != nil {
-			return "", err
+			return agent.CompactResult{}, err
 		}
 		if model.Runtime() == nil {
-			return "", fmt.Errorf("no runtime available")
+			return agent.CompactResult{}, fmt.Errorf("no runtime available")
 		}
-		return model.Runtime().Compact(ctx, summaryPrompt)
+		return model.Runtime().CompactDetailed(ctx, summaryPrompt)
 	})
 
 	rt, err := newTUIRuntime(workingDir, cfg, model)
@@ -61,7 +68,20 @@ func RunTUI(ctx context.Context) error {
 	}
 	model.SetRuntime(rt)
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	// Keep the UI in the alternate screen, but do not enable Bubble Tea mouse
+	// tracking. Mouse tracking makes many terminals send drag events to the app
+	// instead of selecting text, which prevents users from copying generated
+	// output.
+	//
+	// Enabling xterm alternate-scroll mode asks supported terminals to translate
+	// the mouse wheel into cursor-key events while the alternate screen is active.
+	// That keeps wheel scrolling inside the TUI viewport instead of exposing the
+	// terminal scrollback from previous sessions, without stealing drag selection.
+	output := tui.NewNativeCursorWriter(os.Stdout, model.NativeCursorPosition)
+	fmt.Fprint(output, enableAlternateScrollMode)
+	defer fmt.Fprint(output, disableAlternateScrollMode)
+
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithOutput(output))
 	model.SetProgram(p)
 
 	_, err = p.Run()

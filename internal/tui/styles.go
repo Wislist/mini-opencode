@@ -38,6 +38,21 @@ var (
 	permAsk      = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
 
 	cmdStyle = lipgloss.NewStyle().Foreground(colorCyan)
+
+	markdownH1Style   = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	markdownH2Style   = lipgloss.NewStyle().Foreground(colorBlue).Bold(true)
+	markdownH3Style   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	markdownH4Style   = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
+	markdownBoldStyle = lipgloss.NewStyle().Bold(true)
+	inlineCodeStyle   = lipgloss.NewStyle().Foreground(colorCyan).Background(lipgloss.Color("#27272A"))
+	markdownCodeBox   = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorGreen).
+				Foreground(colorFg).
+				Background(lipgloss.Color("#1F2937")).
+				Padding(0, 1)
+	codeLanguageStyle = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	codeOmittedStyle  = lipgloss.NewStyle().Foreground(colorDim).Italic(true)
 )
 
 // Session styles.

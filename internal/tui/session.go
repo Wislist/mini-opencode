@@ -81,7 +81,11 @@ func (m *Model) handleNewSession() (tea.Model, tea.Cmd) {
 	m.addBlock(dimStyle.Render("new session started"))
 	m.gitStatus = collectGitStatus(m.workingDir)
 	m.refreshViewport()
-	return m, nil
+	// Clearing the model content is not always enough after a long transcript:
+	// terminal-side wrapping may have scrolled the alternate screen, leaving
+	// old rows above the newly rendered header. Force the renderer back to the
+	// top-left and clear those rows before drawing the fresh session.
+	return m, tea.ClearScreen
 }
 
 // handleListSessions loads the session list asynchronously and enters the
@@ -122,7 +126,7 @@ func (m *Model) saveCurrentSession() {
 	m.currentSession.Messages = msgs
 	if m.currentSession.Title == "new session" {
 		for _, msg := range msgs {
-			if msg.Role == agent.RoleUser {
+			if msg.Role == agent.RoleUser && !isCompactSummaryMessage(msg) {
 				m.currentSession.Title = session.TitleFromMessage(msg.Content)
 				break
 			}
@@ -137,6 +141,10 @@ func (m *Model) renderHistoryIntoBlocks(messages []agent.Message) {
 	for _, msg := range messages {
 		switch msg.Role {
 		case agent.RoleUser:
+			if isCompactSummaryMessage(msg) {
+				m.addBlock(toolArrow.Render("⟳ previous context compacted"))
+				continue
+			}
 			m.addBlock(m.renderUserMessage(msg.Content))
 		case agent.RoleAssistant:
 			if msg.Content != "" {
@@ -151,7 +159,7 @@ func (m *Model) renderHistoryIntoBlocks(messages []agent.Message) {
 			if len(content) > 200 {
 				content = content[:200] + "..."
 			}
-			arrowW := 2 // "→ " visual width
+			arrowW := 2                                            // "→ " visual width
 			wrapped := wordWrap(content, max(1, m.width-arrowW-2)) // -2 for toolArrow padding
 			m.addBlock(toolArrow.Render("→ " + wrapped))
 		}
@@ -201,4 +209,8 @@ func truncateTitle(title string, maxRunes int) string {
 		return title
 	}
 	return string(r[:maxRunes-1]) + "…"
+}
+
+func isCompactSummaryMessage(msg agent.Message) bool {
+	return msg.Role == agent.RoleUser && strings.Contains(msg.Content, "<conversation_summary>")
 }
