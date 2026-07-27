@@ -161,3 +161,115 @@ func TestMarkdownFourthLevelHeadingIsYellow(t *testing.T) {
 		t.Fatalf("fourth-level heading color = %v, want %v", got, colorYellow)
 	}
 }
+
+func TestRenderAssistantMarkdownSupportsGFMBlocks(t *testing.T) {
+	input := strings.Join([]string{
+		"**粗体**、*斜体*、~~删除线~~、`inline()`",
+		"",
+		"- 无序项目",
+		"  - 嵌套项目",
+		"1. 有序项目",
+		"2. 第二项",
+		"",
+		"- [x] 已完成",
+		"- [ ] 未完成",
+		"",
+		"> 这是引用",
+		"",
+		"[链接](https://example.com) 与 ![图片说明](image.png)",
+		"",
+		"| 名称 | 状态 |",
+		"| --- | ---: |",
+		"| Markdown | 正常 |",
+		"",
+		"术语",
+		": 定义内容",
+		"",
+		"---",
+	}, "\n")
+
+	const width = 64
+	rendered := renderAssistantMarkdown(input, width)
+	plain := ansi.Strip(rendered)
+
+	for _, want := range []string{
+		"粗体", "斜体", "删除线", "inline()",
+		"无序项目", "嵌套项目", "1. 有序项目", "2. 第二项",
+		"[✓] 已完成", "[ ] 未完成", "│ 这是引用",
+		"链接", "https://example.com", "Image: 图片说明", "image.png",
+		"名称", "状态", "Markdown", "正常", "术语", "定义内容", "─",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("rendered GFM missing %q:\n%s", want, plain)
+		}
+	}
+	for _, marker := range []string{"**粗体**", "*斜体*", "~~删除线~~", "`inline()`", "| --- |"} {
+		if strings.Contains(plain, marker) {
+			t.Fatalf("rendered GFM still contains source marker %q:\n%s", marker, plain)
+		}
+	}
+	assertRenderedWidth(t, rendered, width)
+}
+
+func TestRenderAssistantMarkdownSupportsEscapesAutolinksAndEmoji(t *testing.T) {
+	const width = 42
+	rendered := renderAssistantMarkdown(`转义：\*不是斜体\* <https://example.com/very/long/path> :rocket:`, width)
+	plain := ansi.Strip(rendered)
+
+	for _, want := range []string{"*不是斜体*", "https://example.com", "🚀"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("rendered Markdown missing %q: %q", want, plain)
+		}
+	}
+	assertRenderedWidth(t, rendered, width)
+}
+
+func TestRenderAssistantMarkdownSupportsTildeAndStreamingCodeFences(t *testing.T) {
+	const width = 36
+	for _, input := range []string{
+		"~~~json\n{\"ok\": true}\n~~~",
+		"```go\nfmt.Println(\"streaming\")",
+	} {
+		rendered := renderAssistantMarkdown(input, width)
+		plain := ansi.Strip(rendered)
+		if !strings.Contains(plain, "╭") || !strings.Contains(plain, "╰") {
+			t.Fatalf("code fence was not boxed:\n%s", plain)
+		}
+		if strings.Contains(plain, "```") || strings.Contains(plain, "~~~") {
+			t.Fatalf("code fence marker leaked into output:\n%s", plain)
+		}
+		assertRenderedWidth(t, rendered, width)
+	}
+}
+
+func TestMarkdownStyleConfigUsesRequestedHeadingColors(t *testing.T) {
+	style := markdownStyleConfig(80)
+	colors := []*string{
+		style.H1.Color,
+		style.H2.Color,
+		style.H3.Color,
+		style.H4.Color,
+	}
+	wants := []string{"#F87171", "#3B82F6", "#7D56F4", "#FBBF24"}
+	for i := range wants {
+		if colors[i] == nil || *colors[i] != wants[i] {
+			t.Fatalf("heading %d color = %v, want %s", i+1, colors[i], wants[i])
+		}
+	}
+}
+
+func TestRenderAssistantMarkdownWideTableAndCJKStayInsideWidth(t *testing.T) {
+	const width = 32
+	input := "| 列一 | 列二 |\n| --- | --- |\n| " + strings.Repeat("很长的中文", 8) + " | " + strings.Repeat("LongIdentifier", 8) + " |"
+	rendered := renderAssistantMarkdown(input, width)
+	assertRenderedWidth(t, rendered, width)
+}
+
+func assertRenderedWidth(t *testing.T, rendered string, width int) {
+	t.Helper()
+	for i, line := range strings.Split(rendered, "\n") {
+		if got := ansi.StringWidth(line); got > width {
+			t.Fatalf("rendered line %d width = %d, want <= %d: %q", i, got, width, line)
+		}
+	}
+}

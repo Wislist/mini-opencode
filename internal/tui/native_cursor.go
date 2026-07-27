@@ -135,7 +135,11 @@ func (w *nativeCursorWriter) Write(p []byte) (int, error) {
 	}
 	if endsWithRendererCursorPosition(p) && w.cursor != nil {
 		if col, row, ok := w.cursor(); ok {
-			if _, err := io.WriteString(w.out, ansi.CursorPosition(col, row)); err != nil {
+			if _, err := io.WriteString(w.out, ansi.SetTextCursorEnableMode+ansi.CursorPosition(col, row)); err != nil {
+				return n, err
+			}
+		} else {
+			if _, err := io.WriteString(w.out, ansi.ResetTextCursorEnableMode); err != nil {
 				return n, err
 			}
 		}
