@@ -1,0 +1,15 @@
+{
+  "provider": {
+    "name": "echo",
+    "context_window": 8192
+  },
+  "user": "you",
+  "assistant": "assistant",
+  "mcpServers": {
+    "go": {
+      "enabled": false,
+      "command": "gopls",
+      "args": ["mcp"]
+    }
+  }
+}
