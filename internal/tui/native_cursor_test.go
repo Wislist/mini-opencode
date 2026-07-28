@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"io"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -60,6 +61,27 @@ func TestNativeCursorPositionKeepsInputCursorStableWithCommandMenu(t *testing.T)
 		t.Fatalf("row = %d, want 22", row)
 	}
 }
+
+func TestNativeCursorWriterPreservesTerminalFileInterface(t *testing.T) {
+	f := &fakeTerminalFile{Buffer: &bytes.Buffer{}, fd: 123}
+	w := NewNativeCursorWriter(f, nil)
+	tf, ok := w.(terminalFile)
+	if !ok {
+		t.Fatal("wrapped terminal file no longer implements terminalFile")
+	}
+	if got := tf.Fd(); got != 123 {
+		t.Fatalf("Fd() = %d, want 123", got)
+	}
+}
+
+type fakeTerminalFile struct {
+	*bytes.Buffer
+	fd uintptr
+}
+
+func (f *fakeTerminalFile) Read(p []byte) (int, error) { return 0, io.EOF }
+func (f *fakeTerminalFile) Close() error               { return nil }
+func (f *fakeTerminalFile) Fd() uintptr                { return f.fd }
 
 func TestNativeCursorWriterAppendsCursorMoveAfterRenderCursor(t *testing.T) {
 	var out bytes.Buffer

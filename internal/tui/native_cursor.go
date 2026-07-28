@@ -118,15 +118,35 @@ type CursorPositionFunc func() (col, row int, ok bool)
 
 // NewNativeCursorWriter wraps Bubble Tea's output and appends a cursor move
 // after frame renders so terminal IME pre-edit text appears in the active input
-// field instead of on Bubble Tea's final help/status line.
+// field instead of on Bubble Tea's final help/status line. When the wrapped
+// output is a terminal file, preserve its file descriptor interface so Bubble
+// Tea can still query the initial terminal size and emit WindowSizeMsg.
 func NewNativeCursorWriter(out io.Writer, cursor CursorPositionFunc) io.Writer {
-	return &nativeCursorWriter{out: out, cursor: cursor}
+	w := &nativeCursorWriter{out: out, cursor: cursor}
+	if f, ok := out.(terminalFile); ok {
+		return &nativeCursorFileWriter{nativeCursorWriter: w, file: f}
+	}
+	return w
+}
+
+type terminalFile interface {
+	io.ReadWriteCloser
+	Fd() uintptr
 }
 
 type nativeCursorWriter struct {
 	out    io.Writer
 	cursor CursorPositionFunc
 }
+
+type nativeCursorFileWriter struct {
+	*nativeCursorWriter
+	file terminalFile
+}
+
+func (w *nativeCursorFileWriter) Read(p []byte) (int, error) { return w.file.Read(p) }
+func (w *nativeCursorFileWriter) Close() error               { return w.file.Close() }
+func (w *nativeCursorFileWriter) Fd() uintptr                { return w.file.Fd() }
 
 func (w *nativeCursorWriter) Write(p []byte) (int, error) {
 	n, err := w.out.Write(p)

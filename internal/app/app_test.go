@@ -21,7 +21,7 @@ func TestRunVersionThenQuit(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "mini-opencode 0.2.0") {
+	if !strings.Contains(got, "mini-opencode 0.3.0") {
 		t.Fatalf("output missing version: %q", got)
 	}
 }

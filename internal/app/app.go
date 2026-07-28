@@ -18,7 +18,7 @@ import (
 	"github.com/wislist/mini-opencode/internal/skills"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
