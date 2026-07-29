@@ -53,6 +53,8 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		return m.handleName(input)
 	case input == "/compact":
 		return m.startCompact()
+	case input == "/archive":
+		return m.handleArchiveSession()
 	case input == "/newsession":
 		return m.handleNewSession()
 	case input == "/session", input == "/sessions":
@@ -209,11 +211,14 @@ func (m *Model) startCompact() (tea.Model, tea.Cmd) {
 
 func (m *Model) handleRuntimeEvent(event agent.Event) {
 	switch event.Type {
+	case agent.EventRunStarted:
+		m.saveCurrentSession()
 	case agent.EventAssistantDelta:
 		if event.Delta == "" {
 			return
 		}
 		m.streamingText += event.Delta
+		m.queueSessionFlush([]agent.Message{{Role: agent.RoleAssistant, Content: m.streamingText}})
 		rendered := m.renderAssistantMessage(m.streamingText)
 		if m.streamingIdx < 0 {
 			m.addBlock(rendered)
@@ -237,6 +242,7 @@ func (m *Model) handleRuntimeEvent(event agent.Event) {
 		}
 		m.streamingIdx = -1
 		m.streamingText = ""
+		m.saveCurrentSession()
 	case agent.EventToolCallStarted:
 		if event.ToolCall != nil {
 			m.addBlock(m.renderToolCall(event.ToolCall))
@@ -254,6 +260,7 @@ func (m *Model) handleRuntimeEvent(event agent.Event) {
 				m.addBlock(toolArrow.Width(resultWidth).Render("→ " + content))
 			}
 		}
+		m.saveCurrentSession()
 	case agent.EventToolCallFailed, agent.EventToolPermissionDenied:
 		errWidth := max(1, m.width-2)
 		if event.ToolResult != nil && event.ToolResult.Error != "" {
@@ -262,6 +269,9 @@ func (m *Model) handleRuntimeEvent(event agent.Event) {
 		if event.Error != nil && event.Error.Error() != "" {
 			m.addBlock(toolError.Width(errWidth).Render("✗ " + event.Error.Error()))
 		}
+	}
+	if event.Type == agent.EventToolCallFailed || event.Type == agent.EventToolPermissionDenied || event.Type == agent.EventHookDenied || event.Type == agent.EventHookStopped || event.Type == agent.EventRunFailed || event.Type == agent.EventRunFinished {
+		m.saveCurrentSession()
 	}
 	m.refreshViewport()
 }

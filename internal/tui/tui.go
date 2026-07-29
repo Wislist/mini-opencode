@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -118,6 +119,10 @@ type Model struct {
 	nativeCursorCol int
 	nativeCursorRow int
 	nativeCursorOK  bool
+
+	sessionFlushMu       sync.Mutex
+	sessionFlushTimer    *time.Timer
+	sessionFlushSnapshot *session.Session
 }
 
 // Compactor summarizes the current conversation context. It returns the

@@ -42,7 +42,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	currentSession := sessions.Create("new session")
 
 	fmt.Fprintf(out, "mini-opencode %s\n", version)
-	fmt.Fprintln(out, "commands: /help /version /tools /workspace /skills /key /compact /session /newsession /quit")
+	fmt.Fprintln(out, "commands: /help /version /tools /workspace /skills /key /compact /session /newsession /archive /quit")
 
 	for {
 		select {
@@ -75,14 +75,28 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		case "/skills":
 			printSkills(out, workingDir)
 		case "/compact":
-			saveSession(sessions, currentSession, runtime)
+			_ = saveSession(sessions, currentSession, runtime)
 			if err := runCompact(ctx, out, workingDir, runtime); err != nil {
 				fmt.Fprintf(out, "error: %v\n", err)
 			} else {
-				saveSession(sessions, currentSession, runtime)
+				_ = saveSession(sessions, currentSession, runtime)
 			}
 		case "/newsession":
-			saveSession(sessions, currentSession, runtime)
+			_ = saveSession(sessions, currentSession, runtime)
+			currentSession = sessions.Create("new session")
+			runtime.SetMessages(nil)
+			fmt.Fprintln(out, "[new session started]")
+		case "/archive":
+			if err := saveSession(sessions, currentSession, runtime); err != nil {
+				fmt.Fprintf(out, "error: %v\n", err)
+				continue
+			}
+			path, err := sessions.Archive(currentSession.ID)
+			if err != nil {
+				fmt.Fprintf(out, "error: %v\n", err)
+				continue
+			}
+			fmt.Fprintf(out, "[archived session: %s]\n%s\n", currentSession.Title, path)
 			currentSession = sessions.Create("new session")
 			runtime.SetMessages(nil)
 			fmt.Fprintln(out, "[new session started]")
@@ -116,7 +130,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 				fmt.Fprintf(out, "error: %v\n", err)
 				continue
 			}
-			saveSession(sessions, currentSession, runtime)
+			_ = saveSession(sessions, currentSession, runtime)
 			currentSession = sess
 			runtime.SetMessages(sess.Messages)
 			fmt.Fprintf(out, "[switched to: %s]\n", sess.Title)
@@ -179,7 +193,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			if err := runtime.Run(ctx, input, renderEvent(out)); err != nil {
 				fmt.Fprintf(out, "error: %v\n", err)
 			}
-			saveSession(sessions, currentSession, runtime)
+			_ = saveSession(sessions, currentSession, runtime)
 		}
 	}
 }
@@ -187,6 +201,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "mini-opencode is a fresh Go agent terminal project.")
 	fmt.Fprintln(out, "commands: /key <deepseek-api-key> saves a local key and switches provider to DeepSeek.")
+	fmt.Fprintln(out, "sessions: active conversations are stored in .mini-opencode/sessions.db; /archive exports the current session to .mini-opencode/sessions/<id>.json.")
 }
 
 // printWorkspace reports the working directory and any additional allowed
@@ -205,9 +220,9 @@ func printWorkspace(out io.Writer, workingDir string, allowedRoots []string) {
 
 // saveSession persists the current runtime messages to the active session.
 // It auto-titles untitled sessions from the first user message.
-func saveSession(store *session.Store, sess *session.Session, rt *agent.Runtime) {
+func saveSession(store *session.Store, sess *session.Session, rt *agent.Runtime) error {
 	if store == nil || sess == nil || rt == nil {
-		return
+		return nil
 	}
 	msgs := rt.Messages()
 	sess.Messages = msgs
@@ -219,7 +234,7 @@ func saveSession(store *session.Store, sess *session.Session, rt *agent.Runtime)
 			}
 		}
 	}
-	_ = store.Save(sess)
+	return store.Save(sess)
 }
 
 func runCompact(ctx context.Context, out io.Writer, workingDir string, runtime *agent.Runtime) error {

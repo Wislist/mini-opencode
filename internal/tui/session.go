@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,6 +14,9 @@ import (
 
 // SessionManager owns the session store and provides create/switch/save
 // operations. The TUI calls these to implement /newsession and /session.
+
+const sessionFlushDebounce = 33 * time.Millisecond
+
 type SessionManager interface {
 	CreateSession(title string) *session.Session
 	SwitchSession(id string) (*session.Session, error)
@@ -71,6 +75,7 @@ func (m *Model) handleNewSession() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.saveCurrentSession()
+	m.cancelPendingSessionFlush()
 	m.currentSession = m.sessions.Create("new session")
 	if m.runtime != nil {
 		m.runtime.SetMessages(nil)
@@ -116,11 +121,58 @@ func (m *Model) switchSessionCmd(id string) tea.Cmd {
 	}
 }
 
+// handleArchiveSession exports the current session to JSON, removes it from
+// active SQLite storage, and starts a fresh conversation.
+func (m *Model) handleArchiveSession() (tea.Model, tea.Cmd) {
+	if m.sessions == nil {
+		m.addBlock(errorStyle.Render("sessions not configured"))
+		m.refreshViewport()
+		return m, nil
+	}
+	if m.currentSession == nil {
+		m.addBlock(errorStyle.Render("no current session"))
+		m.refreshViewport()
+		return m, nil
+	}
+	if err := m.saveCurrentSessionErr(); err != nil {
+		m.addBlock(errorStyle.Render("✗ archive: " + err.Error()))
+		m.refreshViewport()
+		return m, nil
+	}
+	path, err := m.sessions.Archive(m.currentSession.ID)
+	if err != nil {
+		m.addBlock(errorStyle.Render("✗ archive: " + err.Error()))
+		m.refreshViewport()
+		return m, nil
+	}
+
+	archivedTitle := m.currentSession.Title
+	m.cancelPendingSessionFlush()
+	m.currentSession = m.sessions.Create("new session")
+	if m.runtime != nil {
+		m.runtime.SetMessages(nil)
+	}
+	m.blocks = nil
+	m.streamingIdx = -1
+	m.streamingText = ""
+	m.addBlock(toolArrow.Render("archived session: " + archivedTitle))
+	m.addBlock(dimStyle.Render(path))
+	m.addBlock(dimStyle.Render("new session started"))
+	m.gitStatus = collectGitStatus(m.workingDir)
+	m.refreshViewport()
+	return m, tea.ClearScreen
+}
+
 // saveCurrentSession persists the current runtime messages to the active
 // session. It auto-titles untitled sessions from the first user message.
 func (m *Model) saveCurrentSession() {
+	_ = m.saveCurrentSessionErr()
+}
+
+func (m *Model) saveCurrentSessionErr() error {
+	m.cancelPendingSessionFlush()
 	if m.sessions == nil || m.currentSession == nil || m.runtime == nil {
-		return
+		return nil
 	}
 	msgs := m.runtime.Messages()
 	m.currentSession.Messages = msgs
@@ -132,7 +184,67 @@ func (m *Model) saveCurrentSession() {
 			}
 		}
 	}
-	_ = m.sessions.Save(m.currentSession)
+	return m.sessions.Save(m.currentSession)
+}
+
+// queueSessionFlush persists streaming state with a Crush-style 33ms debounce.
+// Final events call saveCurrentSessionErr(), which cancels any pending debounced
+// write and flushes the authoritative runtime history synchronously.
+func (m *Model) queueSessionFlush(extra []agent.Message) {
+	snap := m.sessionSnapshot(extra)
+	if snap == nil {
+		return
+	}
+	m.sessionFlushMu.Lock()
+	m.sessionFlushSnapshot = snap
+	if m.sessionFlushTimer == nil {
+		m.sessionFlushTimer = time.AfterFunc(sessionFlushDebounce, m.flushPendingSessionSnapshot)
+	} else {
+		m.sessionFlushTimer.Reset(sessionFlushDebounce)
+	}
+	m.sessionFlushMu.Unlock()
+}
+
+func (m *Model) flushPendingSessionSnapshot() {
+	m.sessionFlushMu.Lock()
+	snap := m.sessionFlushSnapshot
+	m.sessionFlushSnapshot = nil
+	m.sessionFlushTimer = nil
+	m.sessionFlushMu.Unlock()
+	if snap != nil && m.sessions != nil {
+		_ = m.sessions.Save(snap)
+	}
+}
+
+func (m *Model) cancelPendingSessionFlush() {
+	m.sessionFlushMu.Lock()
+	if m.sessionFlushTimer != nil {
+		m.sessionFlushTimer.Stop()
+		m.sessionFlushTimer = nil
+	}
+	m.sessionFlushSnapshot = nil
+	m.sessionFlushMu.Unlock()
+}
+
+func (m *Model) sessionSnapshot(extra []agent.Message) *session.Session {
+	if m.sessions == nil || m.currentSession == nil || m.runtime == nil {
+		return nil
+	}
+	snap := *m.currentSession
+	msgs := m.runtime.Messages()
+	if len(extra) > 0 {
+		msgs = append(msgs, extra...)
+	}
+	snap.Messages = msgs
+	if snap.Title == "new session" {
+		for _, msg := range msgs {
+			if msg.Role == agent.RoleUser && !isCompactSummaryMessage(msg) {
+				snap.Title = session.TitleFromMessage(msg.Content)
+				break
+			}
+		}
+	}
+	return &snap
 }
 
 // renderHistoryIntoBlocks rebuilds the transcript blocks from saved messages

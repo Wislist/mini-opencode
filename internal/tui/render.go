@@ -297,6 +297,7 @@ func (m *Model) renderHelp() string {
 		"  " + cmdStyle.Render("/status") + "  show git status and context usage\n" +
 		"  " + cmdStyle.Render("/session") + "  list and switch to a saved conversation\n" +
 		"  " + cmdStyle.Render("/newsession") + "  start a new conversation\n" +
+		"  " + cmdStyle.Render("/archive") + " archive current conversation to JSON\n" +
 		"  " + cmdStyle.Render("/compact") + " summarize and replace the conversation context\n" +
 		"  " + cmdStyle.Render("/key") + "     set DeepSeek API key\n" +
 		"  " + cmdStyle.Render("/name") + "    set or show user/assistant display names\n" +
