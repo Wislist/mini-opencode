@@ -35,6 +35,34 @@ type ToolResult struct {
 type AssistantResponse struct {
 	Content   string
 	ToolCalls []ToolCall
+	// Usage carries provider-reported token accounting for this response. It
+	// stays the zero value when the provider does not report usage.
+	Usage Usage
+	// Warnings carries non-fatal provider problems (a malformed stream chunk,
+	// a truncated response). The runtime surfaces them as events instead of
+	// dropping them silently.
+	Warnings []string
+}
+
+// Usage is provider-reported token accounting for a single completion.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// IsZero reports whether no usage was reported at all.
+func (u Usage) IsZero() bool {
+	return u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0
+}
+
+// Add accumulates other into the receiver.
+func (u Usage) Add(other Usage) Usage {
+	return Usage{
+		PromptTokens:     u.PromptTokens + other.PromptTokens,
+		CompletionTokens: u.CompletionTokens + other.CompletionTokens,
+		TotalTokens:      u.TotalTokens + other.TotalTokens,
+	}
 }
 
 type EventType string
@@ -53,6 +81,22 @@ const (
 	EventRunFailed              EventType = "run_failed"
 	EventHookDenied             EventType = "hook_denied"
 	EventHookStopped            EventType = "hook_stopped"
+	// EventUsage reports token accounting for the turn that just finished.
+	EventUsage EventType = "usage"
+	// EventPlanSubmitted fires when the agent submits a plan through the
+	// exit_plan_mode tool; the UI approves or rejects it.
+	EventPlanSubmitted EventType = "plan_submitted"
+	// EventTodosChanged fires when the agent rewrote the todo list.
+	EventTodosChanged EventType = "todos_changed"
+	// EventContextCompacted fires when the runtime compacted the conversation
+	// automatically because it approached the context window.
+	EventContextCompacted EventType = "context_compacted"
+	// EventBudgetExhausted fires when the turn budget runs out; the run then
+	// also emits EventRunFailed.
+	EventBudgetExhausted EventType = "budget_exhausted"
+	// EventProviderWarning fires for a non-fatal provider problem, such as a
+	// stream chunk that could not be parsed.
+	EventProviderWarning EventType = "provider_warning"
 )
 
 type Event struct {
@@ -63,4 +107,13 @@ type Event struct {
 	ToolResult *ToolResult
 	Error      error
 	Delta      string
+	// Usage is set on EventUsage.
+	Usage *Usage
+	// Plan is set on EventPlanSubmitted.
+	Plan string
+	// Todos is set on EventTodosChanged.
+	Todos string
+	// ContextTokens is set on EventContextCompacted: the context size that
+	// triggered compaction.
+	ContextTokens int
 }

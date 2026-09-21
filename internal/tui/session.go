@@ -83,6 +83,7 @@ func (m *Model) handleNewSession() (tea.Model, tea.Cmd) {
 	m.blocks = nil
 	m.streamingIdx = -1
 	m.streamingText = ""
+	m.todos = ""
 	m.addBlock(dimStyle.Render("new session started"))
 	m.gitStatus = collectGitStatus(m.workingDir)
 	m.refreshViewport()
@@ -155,9 +156,45 @@ func (m *Model) handleArchiveSession() (tea.Model, tea.Cmd) {
 	m.blocks = nil
 	m.streamingIdx = -1
 	m.streamingText = ""
+	m.todos = ""
 	m.addBlock(toolArrow.Render("archived session: " + archivedTitle))
 	m.addBlock(dimStyle.Render(path))
 	m.addBlock(dimStyle.Render("new session started"))
+	m.gitStatus = collectGitStatus(m.workingDir)
+	m.refreshViewport()
+	return m, tea.ClearScreen
+}
+
+// handleForkSession branches the active session into a new one and switches to
+// it, so the conversation continues on a copy while the original is preserved.
+func (m *Model) handleForkSession() (tea.Model, tea.Cmd) {
+	if m.sessions == nil || m.currentSession == nil {
+		m.addBlock(errorStyle.Render("sessions not configured"))
+		m.refreshViewport()
+		return m, nil
+	}
+	m.saveCurrentSession()
+	fork, err := m.sessions.Fork(m.currentSession.ID, "")
+	if err != nil {
+		m.addBlock(errorStyle.Render("✗ fork: " + err.Error()))
+		m.refreshViewport()
+		return m, nil
+	}
+	m.currentSession = fork
+	if m.runtime != nil {
+		m.runtime.SetMessages(fork.Messages)
+		m.runtime.SetUsage(agent.Usage{
+			PromptTokens:     int(fork.PromptTokens),
+			CompletionTokens: int(fork.CompletionTokens),
+			TotalTokens:      int(fork.PromptTokens + fork.CompletionTokens),
+		})
+	}
+	m.todos = m.todosForSession(fork.ID)
+	m.blocks = nil
+	m.streamingIdx = -1
+	m.streamingText = ""
+	m.addBlock(toolArrow.Render("branched into " + fork.Title))
+	m.renderHistoryIntoBlocks(fork.Messages)
 	m.gitStatus = collectGitStatus(m.workingDir)
 	m.refreshViewport()
 	return m, tea.ClearScreen
@@ -176,6 +213,9 @@ func (m *Model) saveCurrentSessionErr() error {
 	}
 	msgs := m.runtime.Messages()
 	m.currentSession.Messages = msgs
+	usage := m.runtime.Usage()
+	m.currentSession.PromptTokens = int64(usage.PromptTokens)
+	m.currentSession.CompletionTokens = int64(usage.CompletionTokens)
 	if m.currentSession.Title == "new session" {
 		for _, msg := range msgs {
 			if msg.Role == agent.RoleUser && !isCompactSummaryMessage(msg) {
@@ -303,7 +343,13 @@ func (m *Model) renderSessionList() string {
 			marker = "▶ "
 			title = toolName.Render(title)
 		}
+		prefix := ""
+		if meta.ParentSessionID != "" {
+			// A branched session keeps its parent visible in the list.
+			prefix = dimStyle.Render("↳ ")
+		}
 		info := dimStyle.Render(fmt.Sprintf("  %d msgs · %s", meta.MessageN, meta.UpdatedAt.Format("2006-01-02 15:04")))
+		title = prefix + title
 		lines = append(lines, marker+title+info)
 	}
 	w := boxWidth(m)

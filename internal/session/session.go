@@ -217,6 +217,44 @@ func (s *Store) Load(id string) (*Session, error) {
 	return s.loadLocked(id)
 }
 
+// Fork copies an existing session into a new one that records the source in
+// parent_session_id, so a conversation can branch without losing the original.
+// The fork inherits the transcript, todo list, and token totals; snapshots and
+// read-file records stay with the source session.
+func (s *Store) Fork(id, title string) (*Session, error) {
+	src, err := s.Load(id)
+	if err != nil {
+		return nil, err
+	}
+	fork := s.Create(branchTitle(src.Title, title))
+	fork.ParentSessionID = src.ID
+	fork.Messages = make([]agent.Message, len(src.Messages))
+	copy(fork.Messages, src.Messages)
+	fork.Todos = nonEmptyTodos(src.Todos)
+	fork.PromptTokens = src.PromptTokens
+	fork.CompletionTokens = src.CompletionTokens
+	if err := s.Save(fork); err != nil {
+		return nil, err
+	}
+	return fork, nil
+}
+
+// branchTitle builds the fork title from the source title and an override.
+func branchTitle(sourceTitle, override string) string {
+	if override = strings.TrimSpace(override); override != "" {
+		return override
+	}
+	sourceTitle = strings.TrimSpace(sourceTitle)
+	if sourceTitle == "" || sourceTitle == "new session" {
+		return "branch"
+	}
+	const suffix = " (branch)"
+	if strings.HasSuffix(sourceTitle, suffix) {
+		return sourceTitle
+	}
+	return sourceTitle + suffix
+}
+
 // Delete removes an active session from SQLite. Missing rows are not an error.
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
@@ -348,6 +386,103 @@ func (s *Store) RecordReadFile(sessionID, path string) error {
 	return err
 }
 
+// HasReadFile reports whether the session already read path.
+func (s *Store) HasReadFile(sessionID, path string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return false
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM read_files WHERE session_id = ? AND path = ?`,
+		sessionID, path).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// SnapshotFile stores the pre-modification content of path, assigning the next
+// version number for that session and path.
+func (s *Store) SnapshotFile(sessionID, path string, content []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return err
+	}
+	var next int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) + 1 FROM files WHERE session_id = ? AND path = ?`,
+		sessionID, path).Scan(&next); err != nil {
+		return err
+	}
+	now := formatTime(time.Now())
+	_, err := s.db.Exec(`INSERT INTO files (session_id, path, version, content, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(path, session_id, version) DO UPDATE SET
+			content = excluded.content,
+			updated_at = excluded.updated_at`, sessionID, path, next, content, now, now)
+	return err
+}
+
+// FileSnapshot is one stored pre-modification revision of a file.
+type FileSnapshot struct {
+	Path      string
+	Version   int
+	Content   []byte
+	UpdatedAt time.Time
+}
+
+// LatestSnapshot returns the most recently stored snapshot of the session.
+// ok is false when the session has no snapshot to restore.
+func (s *Store) LatestSnapshot(sessionID string) (snap FileSnapshot, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return FileSnapshot{}, false, err
+	}
+	var (
+		path, updatedRaw string
+		version          int
+		content          []byte
+	)
+	row := s.db.QueryRow(`SELECT path, version, content, updated_at FROM files
+		WHERE session_id = ? ORDER BY updated_at DESC, version DESC LIMIT 1`, sessionID)
+	switch err := row.Scan(&path, &version, &content, &updatedRaw); {
+	case errors.Is(err, sql.ErrNoRows):
+		return FileSnapshot{}, false, nil
+	case err != nil:
+		return FileSnapshot{}, false, err
+	}
+	updated, _ := parseTime(updatedRaw)
+	return FileSnapshot{Path: path, Version: version, Content: content, UpdatedAt: updated}, true, nil
+}
+
+// LoadTodos returns the stored todo list JSON for a session, or "[]" when the
+// session is unknown or has none.
+func (s *Store) LoadTodos(sessionID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return "[]"
+	}
+	var todos string
+	if err := s.db.QueryRow(`SELECT todos FROM sessions WHERE id = ?`, sessionID).Scan(&todos); err != nil {
+		return "[]"
+	}
+	return nonEmptyTodos(todos)
+}
+
+// SaveTodos replaces the stored todo list JSON for a session.
+func (s *Store) SaveTodos(sessionID, todosJSON string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE sessions SET todos = ?, updated_at = ? WHERE id = ?`,
+		nonEmptyTodos(todosJSON), formatTime(time.Now()), sessionID)
+	return err
+}
+
 func (s *Store) ensureLocked() error {
 	if s.db != nil {
 		return nil
@@ -383,10 +518,30 @@ func (s *Store) initSchemaLocked() error {
 			return err
 		}
 	}
+	if err := s.dropRetiredTriggersLocked(); err != nil {
+		return err
+	}
 	if err := s.importLegacyDBRowsLocked(); err != nil {
 		return err
 	}
 	return s.importLegacyJSONOnceLocked()
+}
+
+// dropRetiredTriggersLocked removes the message_count triggers installed by
+// older builds. They recomputed COUNT(*) over the whole session on every row
+// write, which made saving a long transcript quadratic. Callers that write
+// messages now maintain message_count directly.
+func (s *Store) dropRetiredTriggersLocked() error {
+	for _, name := range []string{
+		"messages_after_insert_count",
+		"messages_after_delete_count",
+		"messages_after_update_session_count",
+	} {
+		if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) applyPragmasLocked() error {
@@ -478,22 +633,6 @@ func schemaStatements() []string {
 			BEGIN
 				UPDATE messages SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = NEW.id;
 			END`,
-		`CREATE TRIGGER IF NOT EXISTS messages_after_insert_count
-			AFTER INSERT ON messages
-			BEGIN
-				UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages WHERE session_id = NEW.session_id) WHERE id = NEW.session_id;
-			END`,
-		`CREATE TRIGGER IF NOT EXISTS messages_after_delete_count
-			AFTER DELETE ON messages
-			BEGIN
-				UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages WHERE session_id = OLD.session_id) WHERE id = OLD.session_id;
-			END`,
-		`CREATE TRIGGER IF NOT EXISTS messages_after_update_session_count
-			AFTER UPDATE OF session_id ON messages
-			BEGIN
-				UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages WHERE session_id = OLD.session_id) WHERE id = OLD.session_id;
-				UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages WHERE session_id = NEW.session_id) WHERE id = NEW.session_id;
-			END`,
 	}
 }
 
@@ -551,9 +690,55 @@ func (s *Store) saveTx(tx *sql.Tx, sess *Session) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM messages WHERE session_id = ?`, sess.ID); err != nil {
+	if err := s.writeMessagesTx(tx, sess); err != nil {
 		return err
 	}
+	// message_count is maintained here rather than by an AFTER INSERT trigger,
+	// which forced a COUNT(*) over the whole session for every single row.
+	// updated_at is only bumped when the count actually changed so repeated
+	// streaming saves do not keep refreshing it. The unchanged case issues no
+	// UPDATE at all: the sessions_after_update_touch trigger fires on any update
+	// that leaves updated_at alone, which would silently refresh the timestamp
+	// and keep expired sessions alive.
+	messageCount := len(sess.Messages)
+	existingCount := -1
+	// The upsert above never rewrites an existing message_count, so this still
+	// observes the previous value (the insert path already stored the new one).
+	if err := tx.QueryRow(`SELECT message_count FROM sessions WHERE id = ?`, sess.ID).Scan(&existingCount); err != nil {
+		return err
+	}
+	if messageCount != existingCount {
+		_, err = tx.Exec(`UPDATE sessions SET message_count = ?, updated_at = ? WHERE id = ?`,
+			messageCount, formatTime(sess.UpdatedAt), sess.ID)
+	}
+	return err
+}
+
+// writeMessagesTx persists the session's message list incrementally. Messages
+// are keyed by (session_id, position) and the store rewrites only the rows that
+// actually changed, so appending a turn during streaming no longer deletes and
+// re-inserts the whole transcript. Positions that disappeared (a compact, an
+// undo, a restored snapshot) are pruned so the stored transcript still mirrors
+// the in-memory one exactly.
+func (s *Store) writeMessagesTx(tx *sql.Tx, sess *Session) error {
+	existing := map[int]messageRowState{}
+	rows, err := tx.Query(`SELECT position, id, role, parts FROM messages WHERE session_id = ?`, sess.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var state messageRowState
+		if err := rows.Scan(&state.position, &state.id, &state.role, &state.parts); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[state.position] = state
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
 
 	summaryID := sess.SummaryMessageID
 	for i, msg := range sess.Messages {
@@ -566,15 +751,27 @@ func (s *Store) saveTx(tx *sql.Tx, sess *Session) error {
 		if isSummary && summaryID == "" {
 			summaryID = msgID
 		}
-		createdAt := sess.CreatedAt.Add(time.Duration(i) * time.Millisecond)
-		createdRaw := formatTime(createdAt)
+		role := string(msg.Role)
+		if state, ok := existing[i]; ok && state.id == msgID && state.role == role && state.parts == parts {
+			delete(existing, i)
+			continue
+		}
+		delete(existing, i)
+
+		createdRaw := formatTime(sess.CreatedAt.Add(time.Duration(i) * time.Millisecond))
 		_, err = tx.Exec(`INSERT INTO messages (
 				id, session_id, role, parts, model, provider, position,
 				created_at, updated_at, finished_at, is_summary_message
-			) VALUES (?, ?, ?, ?, '', '', ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, '', '', ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				role = excluded.role,
+				parts = excluded.parts,
+				position = excluded.position,
+				updated_at = excluded.updated_at,
+				is_summary_message = excluded.is_summary_message`,
 			msgID,
 			sess.ID,
-			string(msg.Role),
+			role,
 			parts,
 			i,
 			createdRaw,
@@ -586,11 +783,30 @@ func (s *Store) saveTx(tx *sql.Tx, sess *Session) error {
 			return err
 		}
 	}
-	_, err = tx.Exec(`UPDATE sessions SET message_count = ?, summary_message_id = NULLIF(?, ''), updated_at = ? WHERE id = ?`, len(sess.Messages), summaryID, formatTime(sess.UpdatedAt), sess.ID)
-	if err == nil {
+
+	// Anything left in existing is a position the session no longer has.
+	for position := range existing {
+		if _, err := tx.Exec(`DELETE FROM messages WHERE session_id = ? AND position = ?`, sess.ID, position); err != nil {
+			return err
+		}
+	}
+
+	if summaryID != sess.SummaryMessageID {
+		if _, err := tx.Exec(`UPDATE sessions SET summary_message_id = NULLIF(?, '') WHERE id = ?`, summaryID, sess.ID); err != nil {
+			return err
+		}
 		sess.SummaryMessageID = summaryID
 	}
-	return err
+	return nil
+}
+
+// messageRowState is the stored form of one message row, used to decide whether
+// a rewrite is actually needed.
+type messageRowState struct {
+	position int
+	id       string
+	role     string
+	parts    string
 }
 
 func (s *Store) loadLocked(id string) (*Session, error) {

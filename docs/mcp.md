@@ -7,6 +7,18 @@
 - `tools/call`
 - MCP tool 到 `agent.Tool` 的适配
 
+## 启动与注册
+
+`config.json` 里 `mcpServers` 中 `enabled: true` 的 server 会在启动时被拉起
+（`internal/mcp.Manager`），完成 `initialize` + `tools/list` 握手后，每个工具以
+`<server>__<tool>` 的形式注册到 runtime，因此 MCP 工具不会静默覆盖同名内置工具。
+启用的名字前缀也会写进工具描述（`[mcp:<server>] ...`）。
+
+单个 server 启动失败（命令不存在、握手超时，默认 15s）不会中断启动：错误会打印成
+`warning: mcp server "x" failed: ...`，并用 `/mcp` 随时查看每个 server 的状态。
+
+所有 MCP 工具默认需要确认（`requires_confirmation`），与内置的写操作一致。
+
 ## Go 官方能力
 
 本项目预留了 Go 官方能力的 MCP 接入位：

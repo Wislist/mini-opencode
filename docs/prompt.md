@@ -56,6 +56,18 @@ Today's date: ...
 
 因此项目级指令只需要改 ContextFiles，不需要改 Go 源码。
 
+## 模板的实际用途
+
+`coder.md.tpl` 是默认 system prompt。其余模板都已有对应能力：
+
+| 模板 | 用途 |
+| --- | --- |
+| `summary.md` | `/compact` 生成会话摘要 |
+| `initialize.md.tpl` | `/init` 分析仓库并生成 `AGENTS.md` |
+| `title.md` | 会话首轮后生成短标题（替换 `new session` 占位） |
+| `task.md.tpl` | `task` 工具的只读子 agent system prompt |
+| `agentic_fetch_prompt.md.tpl` | 供 `web_fetch` / `web_search` 抓取内容后的分析流程 |
+
 ## Skills
 
 `PromptContext.Skills` 会注入到：

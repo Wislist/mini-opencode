@@ -75,6 +75,12 @@ var (
 	gitUntrackedStyle = lipgloss.NewStyle().Foreground(colorRed)
 )
 
+// Diff preview styles used by the permission prompt.
+var (
+	toolAddedStyle   = lipgloss.NewStyle().Foreground(colorGreen)
+	toolRemovedStyle = lipgloss.NewStyle().Foreground(colorRed)
+)
+
 // Context usage styles, color-coded by usage tier.
 var (
 	ctxLowStyle  = lipgloss.NewStyle().Foreground(colorGreen)

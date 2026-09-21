@@ -59,6 +59,18 @@ func NewBashTool(options BashOptions) *BashTool {
 
 func (t *BashTool) Jobs() *JobManager { return t.jobs }
 
+// trailingBackgroundOperator reports whether a command ends in a shell
+// background operator. Trailing whitespace is ignored (the old check missed
+// "sleep 5 & " entirely), and "&&" is a logical AND rather than a background
+// operator, so it is not flagged.
+func trailingBackgroundOperator(command string) bool {
+	trimmed := strings.TrimRight(command, " \t\r\n")
+	if !strings.HasSuffix(trimmed, "&") {
+		return false
+	}
+	return !strings.HasSuffix(trimmed, "&&")
+}
+
 func (t *BashTool) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{
 		Name:        BashToolName,
@@ -99,8 +111,8 @@ func (t *BashTool) Run(ctx context.Context, input agent.ToolInput) (agent.ToolOu
 	if args.Command == "" {
 		return agent.ToolOutput{}, fmt.Errorf("bash: command is required")
 	}
-	if strings.HasSuffix(args.Command, "&") {
-		return agent.ToolOutput{}, fmt.Errorf("bash: use run_in_background instead of trailing &")
+	if trailingBackgroundOperator(args.Command) {
+		return agent.ToolOutput{}, fmt.Errorf("bash: use run_in_background instead of a trailing &")
 	}
 	if banned := t.bannedCommand(args.Command); banned != "" {
 		return agent.ToolOutput{}, fmt.Errorf("bash: banned command matched %q", banned)

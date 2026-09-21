@@ -15,6 +15,10 @@ Hooks intercept the runtime lifecycle to guard against dangerous agent behavior 
 
 `HookChain` runs hooks in order; the first non-continue decision wins, and `Stop` always wins over `Deny`.
 
+`PlanModeHook` 是第三个内置 hook：`Active` 为真时拦截所有非只读工具调用，只放行
+只读工具以及 `exit_plan_mode`、`todo_write`（白名单可通过 `AllowPlanTools` 覆盖）。
+用户在计划审批里通过后，宿主把 `Active` 置回 false，运行继续进入实现阶段。
+
 ## Built-in hooks
 
 ### SafetyHook

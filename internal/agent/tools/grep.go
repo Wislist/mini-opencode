@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,6 +19,18 @@ type GrepTool struct {
 	instructions string
 	maxResults   int
 }
+
+const (
+	// maxGrepFileSize skips files large enough that scanning them would stall
+	// the search without a matching payoff; minified bundles and data dumps
+	// rarely help an agent reason about source.
+	maxGrepFileSize = 4 << 20
+	// maxGrepLineLength bounds a single scanned line so a file without
+	// newlines cannot blow up memory.
+	maxGrepLineLength = 1 << 20
+	// binarySniffSize is how many leading bytes are inspected for NUL bytes.
+	binarySniffSize = 8000
+)
 
 type grepArgs struct {
 	Query      string `json:"query"`
@@ -117,15 +130,33 @@ func grepFile(path string, query string, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	if isLikelyBinary(data) {
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxGrepFileSize {
 		return nil, nil
 	}
 
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	reader := bufio.NewReaderSize(file, 64*1024)
+	// Sniff the leading bytes for NUL to skip binary files without reading the
+	// whole file into memory; Peek keeps them for the scanner below. Peek
+	// returns fewer bytes than requested at EOF, which is fine — the returned
+	// slice is still the file's prefix.
+	if head, err := reader.Peek(binarySniffSize); len(head) > 0 && (err == nil || err == io.EOF) {
+		if isLikelyBinary(head) {
+			return nil, nil
+		}
+	}
+
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxGrepLineLength)
 	var matches []string
 	lineNo := 0
 	for scanner.Scan() {

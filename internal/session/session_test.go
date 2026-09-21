@@ -2,8 +2,10 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -392,5 +394,305 @@ func assertSessionEvent(t *testing.T, events <-chan Event, typ EventType, id str
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for %s event", typ)
+	}
+}
+
+func TestForkCopiesTranscriptAndRecordsParent(t *testing.T) {
+	store := NewStore(t.TempDir())
+	src := store.Create("fix the parser")
+	src.Messages = []agent.Message{
+		{Role: agent.RoleUser, Content: "help me"},
+		{Role: agent.RoleAssistant, Content: "sure"},
+	}
+	src.Todos = `[{"content":"ship","status":"pending"}]`
+	src.PromptTokens = 42
+	src.CompletionTokens = 7
+	if err := store.Save(src); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	fork, err := store.Fork(src.ID, "")
+	if err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+	if fork.ID == src.ID {
+		t.Fatal("fork reused the source id")
+	}
+	if fork.ParentSessionID != src.ID {
+		t.Fatalf("parent = %q, want %q", fork.ParentSessionID, src.ID)
+	}
+	if fork.Title != "fix the parser (branch)" {
+		t.Fatalf("title = %q", fork.Title)
+	}
+	if len(fork.Messages) != 2 || fork.Messages[0].Content != "help me" {
+		t.Fatalf("messages = %#v", fork.Messages)
+	}
+	if fork.PromptTokens != 42 || fork.CompletionTokens != 7 {
+		t.Fatalf("token totals not inherited: %+v", fork)
+	}
+
+	// The fork is persisted and independently editable: appending to it must
+	// not touch the source session.
+	fork.Messages = append(fork.Messages, agent.Message{Role: agent.RoleUser, Content: "another angle"})
+	if err := store.Save(fork); err != nil {
+		t.Fatalf("Save(fork) error = %v", err)
+	}
+	reloadedSrc, err := store.Load(src.ID)
+	if err != nil {
+		t.Fatalf("Load(src) error = %v", err)
+	}
+	if len(reloadedSrc.Messages) != 2 {
+		t.Fatalf("source transcript changed: %#v", reloadedSrc.Messages)
+	}
+	reloadedFork, err := store.Load(fork.ID)
+	if err != nil {
+		t.Fatalf("Load(fork) error = %v", err)
+	}
+	if len(reloadedFork.Messages) != 3 {
+		t.Fatalf("fork transcript = %d messages", len(reloadedFork.Messages))
+	}
+	if reloadedFork.Todos != src.Todos {
+		t.Fatalf("fork todos = %q, want %q", reloadedFork.Todos, src.Todos)
+	}
+
+	metas, err := store.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	found := false
+	for _, meta := range metas {
+		if meta.ID == fork.ID {
+			found = true
+			if meta.ParentSessionID != src.ID {
+				t.Fatalf("listed parent = %q", meta.ParentSessionID)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("fork missing from the session list")
+	}
+}
+
+func TestLoadTodosAndSaveTodos(t *testing.T) {
+	store := NewStore(t.TempDir())
+	sess := store.Create("todos")
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if got := store.LoadTodos(sess.ID); got != "[]" {
+		t.Fatalf("initial todos = %q, want []", got)
+	}
+	if err := store.SaveTodos(sess.ID, `[{"content":"a","status":"pending"}]`); err != nil {
+		t.Fatalf("SaveTodos() error = %v", err)
+	}
+	if got := store.LoadTodos(sess.ID); got != `[{"content":"a","status":"pending"}]` {
+		t.Fatalf("todos = %q", got)
+	}
+	if got := store.LoadTodos("missing"); got != "[]" {
+		t.Fatalf("unknown session todos = %q", got)
+	}
+}
+
+func TestSnapshotFileAndLatestSnapshot(t *testing.T) {
+	store := NewStore(t.TempDir())
+	sess := store.Create("snapshots")
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if store.HasReadFile(sess.ID, "a.go") {
+		t.Fatal("HasReadFile() = true before any read")
+	}
+	if err := store.RecordReadFile(sess.ID, "a.go"); err != nil {
+		t.Fatalf("RecordReadFile() error = %v", err)
+	}
+	if !store.HasReadFile(sess.ID, "a.go") {
+		t.Fatal("HasReadFile() = false after RecordReadFile")
+	}
+
+	if err := store.SnapshotFile(sess.ID, "a.go", []byte("v1")); err != nil {
+		t.Fatalf("SnapshotFile() error = %v", err)
+	}
+	if err := store.SnapshotFile(sess.ID, "a.go", []byte("v2")); err != nil {
+		t.Fatalf("SnapshotFile() error = %v", err)
+	}
+	snap, ok, err := store.LatestSnapshot(sess.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestSnapshot() = %+v, ok=%v, err=%v", snap, ok, err)
+	}
+	if snap.Path != "a.go" || string(snap.Content) != "v2" || snap.Version != 2 {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+
+	if _, ok, err := store.LatestSnapshot("missing"); err != nil || ok {
+		t.Fatalf("LatestSnapshot(missing) ok=%v err=%v", ok, err)
+	}
+}
+
+// A database written by an older build still carries the message_count
+// triggers; opening it must drop them so saving stays linear.
+func TestStoreDropsRetiredMessageCountTriggers(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	if err := store.Save(store.Create("legacy")); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Reinstate the retired triggers by hand, then reopen the store.
+	store.mu.Lock()
+	for _, name := range []string{"messages_after_insert_count", "messages_after_delete_count", "messages_after_update_session_count"} {
+		if _, err := store.db.Exec(`CREATE TRIGGER IF NOT EXISTS ` + name + `
+			AFTER INSERT ON messages
+			BEGIN
+				UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages WHERE session_id = NEW.session_id) WHERE id = NEW.session_id;
+			END`); err != nil {
+			store.mu.Unlock()
+			t.Fatalf("create trigger %s: %v", name, err)
+		}
+	}
+	store.mu.Unlock()
+
+	reopened := NewStore(dir)
+	if err := reopened.Save(reopened.Create("after migration")); err != nil {
+		t.Fatalf("Save() on reopened store error = %v", err)
+	}
+	reopened.mu.Lock()
+	defer reopened.mu.Unlock()
+	for _, name := range []string{"messages_after_insert_count", "messages_after_delete_count", "messages_after_update_session_count"} {
+		var n int
+		if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&n); err != nil {
+			t.Fatalf("query trigger %s: %v", name, err)
+		}
+		if n != 0 {
+			t.Fatalf("retired trigger %s survived the migration", name)
+		}
+	}
+}
+
+// Saving an unchanged prefix must not rewrite it: that is the whole point of
+// the incremental writer.
+func TestStoreIncrementalMessageWriteKeepsUntouchedRows(t *testing.T) {
+	store := NewStore(t.TempDir())
+	sess := store.Create("incremental")
+	sess.Messages = []agent.Message{
+		{Role: agent.RoleUser, Content: "first"},
+		{Role: agent.RoleAssistant, Content: "second"},
+	}
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	before := map[string]string{}
+	store.mu.Lock()
+	rows, err := store.db.Query(`SELECT id, updated_at FROM messages WHERE session_id = ?`, sess.ID)
+	if err != nil {
+		store.mu.Unlock()
+		t.Fatalf("query messages: %v", err)
+	}
+	for rows.Next() {
+		var id, updated string
+		if err := rows.Scan(&id, &updated); err != nil {
+			rows.Close()
+			store.mu.Unlock()
+			t.Fatalf("scan: %v", err)
+		}
+		before[id] = updated
+	}
+	rows.Close()
+	store.mu.Unlock()
+
+	// Append a turn and save again.
+	sess.Messages = append(sess.Messages, agent.Message{Role: agent.RoleUser, Content: "third"})
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() after append error = %v", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for id, updated := range before {
+		var after string
+		if err := store.db.QueryRow(`SELECT updated_at FROM messages WHERE id = ?`, id).Scan(&after); err != nil {
+			t.Fatalf("row %s disappeared: %v", id, err)
+		}
+		if after != updated {
+			t.Fatalf("untouched row %s was rewritten (%s -> %s)", id, updated, after)
+		}
+	}
+	var count, messageCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if err := store.db.QueryRow(`SELECT message_count FROM sessions WHERE id = ?`, sess.ID).Scan(&messageCount); err != nil {
+		t.Fatalf("count column: %v", err)
+	}
+	if count != 3 || messageCount != 3 {
+		t.Fatalf("messages = %d, message_count = %d, want 3 and 3", count, messageCount)
+	}
+}
+
+// Shrinking the transcript (a compact) must prune the rows that no longer
+// exist, and keep message_count in step.
+func TestStorePrunesMessagesAfterCompaction(t *testing.T) {
+	store := NewStore(t.TempDir())
+	sess := store.Create("compact")
+	for i := 0; i < 5; i++ {
+		sess.Messages = append(sess.Messages, agent.Message{Role: agent.RoleUser, Content: "message"})
+	}
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	sess.Messages = []agent.Message{{Role: agent.RoleUser, Content: "<conversation_summary>\nsummary"}}
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() after compact error = %v", err)
+	}
+
+	loaded, err := store.Load(sess.ID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(loaded.Messages) != 1 || !strings.Contains(loaded.Messages[0].Content, "conversation_summary") {
+		t.Fatalf("loaded messages = %#v", loaded.Messages)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var count, messageCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if err := store.db.QueryRow(`SELECT message_count FROM sessions WHERE id = ?`, sess.ID).Scan(&messageCount); err != nil {
+		t.Fatalf("count column: %v", err)
+	}
+	if count != 1 || messageCount != 1 {
+		t.Fatalf("messages = %d, message_count = %d, want 1 and 1", count, messageCount)
+	}
+}
+
+// BenchmarkStoreSaveAppendingTurn measures the incremental writer as the
+// transcript grows. Saving used to delete and re-insert every message on each
+// turn, and three triggers recomputed COUNT(*) over the session per row, which
+// made long sessions quadratic in row visits. The writer now rewrites only the
+// rows that changed, so the remaining cost is the linear per-save pass that
+// encodes each message for comparison (~1ms at 800 messages).
+func BenchmarkStoreSaveAppendingTurn(b *testing.B) {
+	for _, messages := range []int{50, 200, 800} {
+		b.Run(fmt.Sprintf("%d-messages", messages), func(b *testing.B) {
+			store := NewStore(b.TempDir())
+			sess := store.Create("bench")
+			for i := 0; i < messages; i++ {
+				sess.Messages = append(sess.Messages, agent.Message{Role: agent.RoleUser, Content: "message body"})
+			}
+			if err := store.Save(sess); err != nil {
+				b.Fatalf("initial Save() error = %v", err)
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				sess.Messages = append(sess.Messages, agent.Message{Role: agent.RoleUser, Content: "another turn"})
+				sess.UpdatedAt = time.Now()
+				if err := store.Save(sess); err != nil {
+					b.Fatalf("Save() error = %v", err)
+				}
+			}
+		})
 	}
 }

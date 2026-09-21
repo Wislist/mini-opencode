@@ -84,3 +84,39 @@ func mustWrite(t *testing.T, path string, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestGrepToolSkipsBinaryAndOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "text.txt"), "needle here")
+	if err := os.WriteFile(filepath.Join(dir, "blob.bin"), []byte("needle\x00needle"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Sparse file just over the size cap: the search must skip it without
+	// reading its contents into memory.
+	big := filepath.Join(dir, "big.txt")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxGrepFileSize + 1); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("needle"), 0); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	tool := NewGrepTool(FileOptions{WorkDir: dir})
+	out, err := tool.Run(context.Background(), searchToolInput(GrepToolName, map[string]any{"query": "needle"}))
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(out.Content, "text.txt") {
+		t.Fatalf("content = %q, want text.txt match", out.Content)
+	}
+	if strings.Contains(out.Content, "blob.bin") || strings.Contains(out.Content, "big.txt") {
+		t.Fatalf("content = %q, want binary and oversized files skipped", out.Content)
+	}
+}

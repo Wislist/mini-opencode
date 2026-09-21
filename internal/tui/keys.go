@@ -23,6 +23,34 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleCompactingKey(msg)
 	case stateSessionList:
 		return m.handleSessionListKey(msg)
+	case statePlanApproval:
+		return m.handlePlanApprovalKey(msg)
+	}
+	return m, nil
+}
+
+// handlePlanApprovalKey resolves a submitted plan. Approving ends plan mode so
+// the agent can continue into implementation; rejecting keeps plan mode on.
+func (m *Model) handlePlanApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y", "enter":
+		if m.pendingPlan != nil {
+			m.pendingPlan.resp <- planDecision{approved: true}
+		}
+		m.pendingPlan = nil
+		m.mode = ModeCode
+		if m.planHook != nil {
+			m.planHook.Active = false
+		}
+		m.state = stateRunning
+		m.refreshViewport()
+	case "n", "N", "esc":
+		if m.pendingPlan != nil {
+			m.pendingPlan.resp <- planDecision{approved: false}
+		}
+		m.pendingPlan = nil
+		m.state = stateRunning
+		m.refreshViewport()
 	}
 	return m, nil
 }
@@ -137,21 +165,28 @@ func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
-		if m.pendingPerm != nil {
-			m.pendingPerm.resp <- true
-		}
-		m.pendingPerm = nil
-		m.state = stateRunning
-		m.refreshViewport()
+		m.resolvePermission(permissionDecision{allow: true})
+	case "a", "A":
+		// Approve and stop prompting for this tool for the rest of the session.
+		m.resolvePermission(permissionDecision{allow: true, always: true})
 	case "n", "N", "esc":
-		if m.pendingPerm != nil {
-			m.pendingPerm.resp <- false
-		}
-		m.pendingPerm = nil
-		m.state = stateRunning
-		m.refreshViewport()
+		m.resolvePermission(permissionDecision{allow: false})
 	}
 	return m, nil
+}
+
+// resolvePermission answers the pending permission request and records a
+// session-wide approval when the user chose "always".
+func (m *Model) resolvePermission(decision permissionDecision) {
+	if m.pendingPerm != nil {
+		if decision.always && decision.allow {
+			m.allowToolForSession(m.pendingPerm.call.Name)
+		}
+		m.pendingPerm.resp <- decision
+	}
+	m.pendingPerm = nil
+	m.state = stateRunning
+	m.refreshViewport()
 }
 
 func (m *Model) handleKeyPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

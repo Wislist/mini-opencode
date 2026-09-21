@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,9 +74,66 @@ func TestRunKeyCommandSavesLocalDeepSeekConfig(t *testing.T) {
 func TestConfirmToolAcceptsChineseAllow(t *testing.T) {
 	scanner := bufio.NewScanner(strings.NewReader("允许\n"))
 	var out bytes.Buffer
-	confirm := confirmTool(scanner, &out)
+	confirm := confirmTool(scanner, &out, map[string]bool{}, t.TempDir())
 
 	if !confirm(context.Background(), agent.ToolCall{Name: "bash"}, agent.ToolResult{}) {
 		t.Fatal("expected confirmation to be accepted")
+	}
+}
+
+func TestConfirmToolAlwaysAllowsForSession(t *testing.T) {
+	scanner := bufio.NewScanner(strings.NewReader("a\n"))
+	var out bytes.Buffer
+	allowed := map[string]bool{}
+	confirm := confirmTool(scanner, &out, allowed, t.TempDir())
+
+	if !confirm(context.Background(), agent.ToolCall{Name: "edit"}, agent.ToolResult{}) {
+		t.Fatal("expected the always answer to allow the call")
+	}
+	if !allowed["edit"] {
+		t.Fatal("tool was not added to the session allowlist")
+	}
+	// The next call for the same tool is approved without prompting, so the
+	// exhausted scanner is never read again.
+	if !confirm(context.Background(), agent.ToolCall{Name: "edit"}, agent.ToolResult{}) {
+		t.Fatal("allowlisted tool should be approved without a prompt")
+	}
+}
+
+func TestConfirmToolDeniesByDefault(t *testing.T) {
+	scanner := bufio.NewScanner(strings.NewReader("\n"))
+	var out bytes.Buffer
+	confirm := confirmTool(scanner, &out, map[string]bool{}, t.TempDir())
+	if confirm(context.Background(), agent.ToolCall{Name: "bash"}, agent.ToolResult{}) {
+		t.Fatal("empty answer should deny")
+	}
+}
+
+func TestToolDiffPreviewShowsEditAndWriteChanges(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	editArgs, _ := json.Marshal(map[string]any{"path": "a.txt", "old_string": "two", "new_string": "TWO"})
+	preview := toolDiffPreview(agent.ToolCall{Name: "edit", Arguments: editArgs}, dir)
+	if !strings.Contains(preview, "- two") || !strings.Contains(preview, "+ TWO") {
+		t.Fatalf("edit preview = %q", preview)
+	}
+
+	writeArgs, _ := json.Marshal(map[string]any{"path": "a.txt", "content": "one\n2\nthree\n"})
+	preview = toolDiffPreview(agent.ToolCall{Name: "write", Arguments: writeArgs}, dir)
+	if !strings.Contains(preview, "- two") || !strings.Contains(preview, "+ 2") {
+		t.Fatalf("write preview = %q", preview)
+	}
+
+	newFileArgs, _ := json.Marshal(map[string]any{"path": "new.txt", "content": "hello\n"})
+	preview = toolDiffPreview(agent.ToolCall{Name: "write", Arguments: newFileArgs}, dir)
+	if !strings.Contains(preview, "new file") || !strings.Contains(preview, "+ hello") {
+		t.Fatalf("new-file preview = %q", preview)
+	}
+
+	if preview := toolDiffPreview(agent.ToolCall{Name: "read"}, dir); preview != "" {
+		t.Fatalf("read preview = %q, want empty", preview)
 	}
 }

@@ -65,15 +65,32 @@ func (t *WriteTool) Run(_ context.Context, input agent.ToolInput) (agent.ToolOut
 	if statErr != nil && !created {
 		return agent.ToolOutput{}, fmt.Errorf("write: %w", statErr)
 	}
+	// Overwriting an existing file requires having read it first, and the
+	// previous content is snapshotted so the session can restore it.
+	var previous []byte
+	if !created {
+		if err := checkReadBeforeWrite(t.options, path, true); err != nil {
+			return agent.ToolOutput{}, fmt.Errorf("write: %w", err)
+		}
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			previous = data
+			observeSnapshot(t.options.Observer, path, data)
+		}
+	}
 	if err := os.WriteFile(path, []byte(args.Content), 0644); err != nil {
 		return agent.ToolOutput{}, fmt.Errorf("write: %w", err)
 	}
+	metadata := map[string]any{
+		"path":    path,
+		"bytes":   len(args.Content),
+		"created": created,
+	}
+	if previous != nil {
+		metadata["previous_bytes"] = len(previous)
+		metadata["snapshot"] = true
+	}
 	return agent.ToolOutput{
-		Content: fmt.Sprintf("wrote %s", path),
-		Metadata: map[string]any{
-			"path":    path,
-			"bytes":   len(args.Content),
-			"created": created,
-		},
+		Content:  fmt.Sprintf("wrote %s", path),
+		Metadata: metadata,
 	}, nil
 }

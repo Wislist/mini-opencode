@@ -13,7 +13,9 @@ import (
 	"github.com/wislist/mini-opencode/internal/agent/prompt"
 	"github.com/wislist/mini-opencode/internal/agent/tools"
 	"github.com/wislist/mini-opencode/internal/config"
+	"github.com/wislist/mini-opencode/internal/mcp"
 	"github.com/wislist/mini-opencode/internal/session"
+	"github.com/wislist/mini-opencode/internal/skills"
 	"github.com/wislist/mini-opencode/internal/tui"
 )
 
@@ -37,10 +39,50 @@ func RunTUI(ctx context.Context) error {
 
 	model := tui.New(&cfg, workingDir, version)
 
+	// Start the configured MCP servers once; their tools are re-registered on
+	// every runtime rebuild so /key and reloads keep them available.
+	mcpManager := mcp.NewManager()
+	mcpManager.Start(ctx, mcpServerConfigs(cfg.MCPServers))
+	defer mcpManager.Close()
+
+	model.SetMCPStatusProvider(func() []string {
+		var lines []string
+		for _, status := range mcpManager.Statuses() {
+			lines = append(lines, status.String())
+		}
+		return lines
+	})
+
 	planHook := &agent.PlanModeHook{Active: false}
 	model.SetPlanHook(planHook)
 
-	model.SetSessionStore(session.NewStore(workingDir))
+	sessionStore := session.NewStore(workingDir)
+	model.SetSessionStore(sessionStore)
+	observer := newSessionFileObserver(sessionStore, model.CurrentSessionID)
+	todos := newSessionTodoStore(sessionStore, model.CurrentSessionID)
+
+	model.SetTitleGenerator(func(ctx context.Context, firstUser string) (string, error) {
+		generate := makeTitleGenerator(cfg, workingDir)
+		return generate(ctx, firstUser)
+	})
+	model.SetInitPromptProvider(func() (string, error) {
+		return initSystemPrompt(workingDir)
+	})
+
+	model.SetSnapshotRestorer(func() (string, error) {
+		id := model.CurrentSessionID()
+		snap, ok, err := sessionStore.LatestSnapshot(id)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "", fmt.Errorf("no snapshot recorded in this session")
+		}
+		if err := os.WriteFile(snap.Path, snap.Content, 0644); err != nil {
+			return "", err
+		}
+		return snap.Path, nil
+	})
 
 	model.SetKeySaver(func(key string) (config.Config, error) {
 		return saveProviderKey(workingDir, &cfg, key)
@@ -49,7 +91,7 @@ func RunTUI(ctx context.Context) error {
 		return saveDisplayNames(workingDir, &cfg, user, assistant)
 	})
 	model.SetRuntimeFactory(func(newCfg config.Config) (*agent.Runtime, error) {
-		return newTUIRuntime(workingDir, newCfg, model)
+		return newTUIRuntime(workingDir, newCfg, model, tuiRuntimeExtras(newCfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model))
 	})
 	model.SetCompactor(func(ctx context.Context) (agent.CompactResult, error) {
 		summaryPrompt, err := prompt.SummarySystemPrompt(workingDir)
@@ -62,11 +104,16 @@ func RunTUI(ctx context.Context) error {
 		return model.Runtime().CompactDetailed(ctx, summaryPrompt)
 	})
 
-	rt, err := newTUIRuntime(workingDir, cfg, model)
+	rt, err := newTUIRuntime(workingDir, cfg, model, tuiRuntimeExtras(cfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model))
 	if err != nil {
 		return err
 	}
 	model.SetRuntime(rt)
+	for _, status := range mcpManager.Statuses() {
+		if status.Enabled && status.Err != "" {
+			model.AddSystemNotice(fmt.Sprintf("mcp server %q failed: %s", status.Name, status.Err))
+		}
+	}
 
 	// Keep the UI in the alternate screen, but do not enable Bubble Tea mouse
 	// tracking. Mouse tracking makes many terminals send drag events to the app
@@ -88,13 +135,36 @@ func RunTUI(ctx context.Context) error {
 	return err
 }
 
-func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model) (*agent.Runtime, error) {
+// tuiRuntimeExtras assembles the runtime dependencies for the TUI, including
+// the subagent runner built from the current provider configuration.
+func tuiRuntimeExtras(cfg config.Config, workingDir string, mcpTools []agent.Tool,
+	observer tools.FileObserver, todos tools.TodoStore, planHook *agent.PlanModeHook, model *tui.Model) runtimeExtras {
+	extras := runtimeExtras{
+		mcpTools:     mcpTools,
+		observer:     observer,
+		todos:        todos,
+		planHook:     planHook,
+		planApprover: model.MakePlanApprover(),
+	}
+	if subProvider, err := newSubagentProvider(cfg, workingDir); err == nil {
+		extras.subagent = newSubagentRunner(subProvider, workingDir, cfg)
+	}
+	return extras
+}
+
+func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extras runtimeExtras) (*agent.Runtime, error) {
 	promptContext := prompt.DefaultPromptContext(workingDir)
 	contextFiles, err := prompt.DiscoverContextFiles(workingDir, nil)
 	if err != nil {
 		return nil, err
 	}
 	promptContext.ContextFiles = contextFiles
+
+	installed, err := skills.LoadSkills(workingDir)
+	if err != nil {
+		return nil, err
+	}
+	promptContext.Skills = toPromptSkills(installed)
 
 	systemPrompt, err := prompt.BuildSystemPrompt(prompt.PromptCoder, promptContext)
 	if err != nil {
@@ -106,13 +176,43 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model) (*age
 		return nil, err
 	}
 
+	summaryPrompt, err := prompt.SummarySystemPrompt(workingDir)
+	if err != nil {
+		return nil, err
+	}
+
 	options := []agent.RuntimeOption{
 		agent.WithSystemPrompt(systemPrompt),
+		agent.WithMaxTurns(cfg.Agent.EffectiveMaxTurns()),
+		agent.WithContextWindow(cfg.Provider.EffectiveContextWindow()),
+		agent.WithCompactionPrompt(summaryPrompt),
+		agent.WithCompactionThreshold(cfg.Agent.CompactThreshold),
 		agent.WithPermissionPolicy(agent.NewDefaultPermissionPolicyWithRoots(workingDir, cfg.Workspace.AllowedRoots)),
 		agent.WithPermissionConfirmer(model.MakeConfirmer()),
-		agent.WithHook(model.PlanHook()),
+		// The danger guard and loop guard must be registered on the TUI path
+		// too, not only in the line-mode CLI: otherwise the interactive UI can
+		// run destructive commands the CLI would have blocked.
+		agent.WithHook(agent.NewSafetyHook(workingDir)),
+		agent.WithHook(agent.NewLoopGuardHook()),
 	}
-	for _, tool := range tools.CodingTools(tools.CodingToolOptions{WorkDir: workingDir, AllowedRoots: cfg.Workspace.AllowedRoots}) {
+	if extras.planHook != nil {
+		options = append(options, agent.WithHook(extras.planHook))
+	}
+
+	codingOptions := tools.CodingToolOptions{
+		WorkDir:                workingDir,
+		AllowedRoots:           cfg.Workspace.AllowedRoots,
+		Observer:               extras.observer,
+		RequireReadBeforeWrite: cfg.Workspace.ReadBeforeWrite(),
+		Todos:                  extras.todos,
+		PlanApprover:           extras.planApprover,
+		Web:                    webOptions(cfg, workingDir),
+		TaskRunner:             subagentRunnerFor(extras),
+	}
+	for _, tool := range tools.CodingTools(codingOptions) {
+		options = append(options, agent.WithTool(tool))
+	}
+	for _, tool := range extras.mcpTools {
 		options = append(options, agent.WithTool(tool))
 	}
 

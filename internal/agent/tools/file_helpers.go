@@ -5,12 +5,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 type FileOptions struct {
 	WorkDir         string
 	AllowedRoots    []string
 	InstructionData InstructionData
+	// Observer records reads and pre-modification snapshots. Optional.
+	Observer FileObserver
+	// RequireReadBeforeWrite rejects write/edit on an existing file the
+	// session has not read. Enabled by default in the app wiring.
+	RequireReadBeforeWrite bool
 }
 
 func normalizeFileOptions(options FileOptions) FileOptions {
@@ -97,8 +103,8 @@ func resolveWorkspacePathWithOptions(options FileOptions, path string) (string, 
 
 func isLikelyBinary(data []byte) bool {
 	limit := len(data)
-	if limit > 8000 {
-		limit = 8000
+	if limit > binarySniffSize {
+		limit = binarySniffSize
 	}
 	for _, b := range data[:limit] {
 		if b == 0 {
@@ -106,4 +112,19 @@ func isLikelyBinary(data []byte) bool {
 		}
 	}
 	return false
+}
+
+// clipBytes truncates text to at most maxBytes without splitting a UTF-8 rune.
+func clipBytes(text string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(text) <= maxBytes {
+		return text
+	}
+	cut := text[:maxBytes]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }

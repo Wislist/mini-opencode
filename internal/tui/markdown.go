@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	glamour "github.com/charmbracelet/glamour"
@@ -60,12 +61,7 @@ func renderMarkdownDocument(source string, width int) string {
 	// in the TUI, so remove only unmatched strong markers outside code spans.
 	source = removeUnmatchedStrongMarkers(source)
 
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(markdownStyleConfig(width)),
-		glamour.WithWordWrap(width),
-		glamour.WithTableWrap(true),
-		glamour.WithEmoji(),
-	)
+	renderer, err := markdownRenderer(width)
 	if err != nil {
 		return markdownFallback(source, width)
 	}
@@ -75,6 +71,39 @@ func renderMarkdownDocument(source string, width int) string {
 		return markdownFallback(source, width)
 	}
 	return strings.Trim(result, "\n")
+}
+
+// markdownRendererCache memoizes one Glamour renderer per terminal width.
+// Building a renderer recompiles styles and is comparatively expensive, and
+// streaming re-renders the same assistant block on every frame at a stable
+// width, so the cache removes that per-frame cost.
+var markdownRendererCache = struct {
+	mu        sync.Mutex
+	renderers map[int]*glamour.TermRenderer
+}{renderers: map[int]*glamour.TermRenderer{}}
+
+func markdownRenderer(width int) (*glamour.TermRenderer, error) {
+	markdownRendererCache.mu.Lock()
+	if r, ok := markdownRendererCache.renderers[width]; ok {
+		markdownRendererCache.mu.Unlock()
+		return r, nil
+	}
+	markdownRendererCache.mu.Unlock()
+
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStyles(markdownStyleConfig(width)),
+		glamour.WithWordWrap(width),
+		glamour.WithTableWrap(true),
+		glamour.WithEmoji(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	markdownRendererCache.mu.Lock()
+	markdownRendererCache.renderers[width] = r
+	markdownRendererCache.mu.Unlock()
+	return r, nil
 }
 
 func markdownStyleConfig(width int) glamouransi.StyleConfig {

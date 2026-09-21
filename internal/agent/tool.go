@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 )
 
 type Tool interface {
@@ -41,8 +42,14 @@ type ToolOutput struct {
 }
 
 type ToolRegistry struct {
+	// mu guards the tool map and the name order. The registry is written once
+	// during construction, but Specs() and Definition() are read from the run
+	// goroutine and from the UI, so the lazy sort below has to be safe.
+	mu     sync.RWMutex
 	tools  map[string]Tool
 	order  []string
+	sorted bool
+	// policy is set once before any run and never mutated afterwards.
 	policy PermissionPolicy
 }
 
@@ -55,6 +62,8 @@ func (r *ToolRegistry) SetPermissionPolicy(policy PermissionPolicy) {
 }
 
 func (r *ToolRegistry) Register(tool Tool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	spec := tool.Definition()
 	if spec.Name == "" {
 		return fmt.Errorf("tool name is required")
@@ -64,13 +73,26 @@ func (r *ToolRegistry) Register(tool Tool) error {
 	}
 	r.tools[spec.Name] = tool
 	r.order = append(r.order, spec.Name)
-	sort.Strings(r.order)
+	r.sorted = false
 	return nil
 }
 
+// sortedNames returns the registration order in name order, sorting lazily.
+// Callers must hold mu.
+func (r *ToolRegistry) sortedNames() []string {
+	if !r.sorted {
+		sort.Strings(r.order)
+		r.sorted = true
+	}
+	return r.order
+}
+
 func (r *ToolRegistry) Specs() []ToolSpec {
-	specs := make([]ToolSpec, 0, len(r.order))
-	for _, name := range r.order {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	names := r.sortedNames()
+	specs := make([]ToolSpec, 0, len(names))
+	for _, name := range names {
 		specs = append(specs, r.tools[name].Definition())
 	}
 	return specs
@@ -78,6 +100,8 @@ func (r *ToolRegistry) Specs() []ToolSpec {
 
 // Definition returns the registered definition for a tool by name.
 func (r *ToolRegistry) Definition(name string) (ToolDefinition, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	tool, ok := r.tools[name]
 	if !ok {
 		return ToolDefinition{}, false
@@ -94,7 +118,10 @@ func (r *ToolRegistry) RunApproved(ctx context.Context, call ToolCall) ToolResul
 }
 
 func (r *ToolRegistry) run(ctx context.Context, call ToolCall, approved bool) ToolResult {
+	r.mu.RLock()
 	tool, ok := r.tools[call.Name]
+	policy := r.policy
+	r.mu.RUnlock()
 	if !ok {
 		return ToolResult{
 			ToolCallID: call.ID,
@@ -103,8 +130,8 @@ func (r *ToolRegistry) run(ctx context.Context, call ToolCall, approved bool) To
 		}
 	}
 	definition := tool.Definition()
-	if r.policy != nil {
-		decision := r.policy.Check(ctx, call, definition)
+	if policy != nil {
+		decision := policy.Check(ctx, call, definition)
 		switch decision.Action {
 		case PermissionDeny:
 			return ToolResult{

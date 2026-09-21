@@ -45,3 +45,20 @@ func TestPlanModeHookActiveDeniesBash(t *testing.T) {
 		t.Fatalf("bash should be denied in plan mode, got %s", d.Action)
 	}
 }
+
+func TestPlanModeHookAllowsPlanSubmissionTools(t *testing.T) {
+	h := &PlanModeHook{Active: true}
+	for _, name := range DefaultPlanModeAllowedTools {
+		decision := h.BeforeToolCall(context.Background(), ToolCall{Name: name},
+			ToolDefinition{Name: name, Behavior: ToolBehavior{ReadOnly: true}})
+		if decision.Action != HookContinue {
+			t.Fatalf("tool %q blocked in plan mode: %v", name, decision.Reason)
+		}
+	}
+	// A non-read-only tool outside the allow-list is still blocked.
+	decision := h.BeforeToolCall(context.Background(), ToolCall{Name: "write"},
+		ToolDefinition{Name: "write"})
+	if decision.Action != HookDeny {
+		t.Fatalf("write decision = %v, want deny", decision.Action)
+	}
+}

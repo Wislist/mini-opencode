@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -190,15 +191,15 @@ func (h *SafetyHook) checkPath(args json.RawMessage) string {
 			continue
 		}
 		target := raw
-		if !isAbs(target) {
-			target = joinPath(h.WorkDir, target)
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(h.WorkDir, target)
 		}
-		abs := cleanPath(target)
-		base := cleanPath(h.WorkDir)
+		abs := filepath.Clean(target)
+		base := filepath.Clean(h.WorkDir)
 		if abs == base {
 			return fmt.Sprintf("safety: refusing to overwrite/delete workspace root: %s", raw)
 		}
-		if strings.HasPrefix(abs, base+sep()+".git") {
+		if strings.HasPrefix(abs, base+string(filepath.Separator)+".git") {
 			return fmt.Sprintf("safety: refusing to modify .git: %s", raw)
 		}
 	}
@@ -311,36 +312,3 @@ func turnSignature(history []Message) string {
 	}
 	return b.String()
 }
-
-// Path helpers kept local to avoid importing filepath in the hook's hot path
-// tests; they mirror filepath behavior.
-func isAbs(p string) bool {
-	return strings.HasPrefix(p, "/")
-}
-
-func joinPath(base, rel string) string {
-	if base == "" {
-		return rel
-	}
-	return strings.TrimRight(base, "/") + "/" + rel
-}
-
-func cleanPath(p string) string {
-	parts := strings.Split(p, "/")
-	var stack []string
-	for _, part := range parts {
-		switch part {
-		case "", ".":
-			continue
-		case "..":
-			if len(stack) > 0 {
-				stack = stack[:len(stack)-1]
-			}
-		default:
-			stack = append(stack, part)
-		}
-	}
-	return "/" + strings.Join(stack, "/")
-}
-
-func sep() string { return "/" }

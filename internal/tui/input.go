@@ -33,6 +33,21 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		m.addBlock(m.renderWorkspace())
 		m.refreshViewport()
 		return m, nil
+	case input == "/mcp":
+		m.addBlock(m.renderMCPStatus())
+		m.refreshViewport()
+		return m, nil
+	case input == "/init":
+		return m.startInit()
+	case input == "/fork":
+		return m.handleForkSession()
+	case input == "/plan":
+		m.toggleMode()
+		m.addBlock(toolArrow.Render("mode: " + m.mode.String()))
+		m.refreshViewport()
+		return m, nil
+	case input == "/undo":
+		return m.handleUndo()
 	case input == "/status":
 		m.gitStatus = collectGitStatus(m.workingDir)
 		m.addBlock(m.renderStatus())
@@ -72,6 +87,11 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 	}
 
 	m.addBlock(m.renderUserMessage(input))
+	return m.startRun(input)
+}
+
+// startRun launches a runtime run for input, streaming events into the TUI.
+func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
 	m.state = stateRunning
 	m.input.Blur()
 
@@ -174,6 +194,69 @@ func (m *Model) handleName(input string) (tea.Model, tea.Cmd) {
 	return m, textinput.Blink
 }
 
+// startInit runs one analysis turn with the initialize prompt template so the
+// agent can create or refresh AGENTS.md, then restores the normal prompt.
+func (m *Model) startInit() (tea.Model, tea.Cmd) {
+	if m.runtime == nil {
+		m.addBlock(errorStyle.Render("no runtime available. use /key to configure."))
+		m.refreshViewport()
+		return m, nil
+	}
+	if m.initPromptProvider == nil {
+		m.addBlock(errorStyle.Render("init prompt is not configured"))
+		m.refreshViewport()
+		return m, nil
+	}
+	system, err := m.initPromptProvider()
+	if err != nil {
+		m.addBlock(errorStyle.Render("✗ init: " + err.Error()))
+		m.refreshViewport()
+		return m, nil
+	}
+	m.systemPromptRestore = m.runtime.SystemPrompt()
+	m.runtime.SetSystemPrompt(system)
+	m.addBlock(toolArrow.Render("analyzing the repository to write AGENTS.md"))
+	return m.startRun(initUserPrompt)
+}
+
+// maybeGenerateTitle asks the provider for a title while the session still has
+// its placeholder name, so /session lists stay readable.
+func (m *Model) maybeGenerateTitle() tea.Cmd {
+	if m.titleGenerator == nil || m.runtime == nil || m.currentSession == nil {
+		return nil
+	}
+	if m.currentSession.Title != "new session" {
+		return nil
+	}
+	first := firstUserMessage(m.runtime.Messages())
+	if first == "" {
+		return nil
+	}
+	generate := m.titleGenerator
+	return func() tea.Msg {
+		title, err := generate(context.Background(), first)
+		return sessionTitleMsg{title: title, err: err}
+	}
+}
+
+// handleUndo restores the newest file snapshot recorded in this session.
+func (m *Model) handleUndo() (tea.Model, tea.Cmd) {
+	if m.snapshotRestorer == nil {
+		m.addBlock(errorStyle.Render("snapshot restore is not configured"))
+		m.refreshViewport()
+		return m, nil
+	}
+	path, err := m.snapshotRestorer()
+	if err != nil {
+		m.addBlock(errorStyle.Render("✗ undo: " + err.Error()))
+	} else {
+		m.addBlock(toolArrow.Render("restored " + path))
+		m.gitStatus = collectGitStatus(m.workingDir)
+	}
+	m.refreshViewport()
+	return m, nil
+}
+
 func (m *Model) startCompact() (tea.Model, tea.Cmd) {
 	if m.runtime == nil {
 		m.addBlock(errorStyle.Render("no runtime available. use /key to configure."))
@@ -269,6 +352,26 @@ func (m *Model) handleRuntimeEvent(event agent.Event) {
 		if event.Error != nil && event.Error.Error() != "" {
 			m.addBlock(toolError.Width(errWidth).Render("✗ " + event.Error.Error()))
 		}
+	case agent.EventProviderWarning:
+		if event.Error != nil {
+			m.addBlock(toolError.Width(max(1, m.width-2)).Render("! provider: " + event.Error.Error()))
+		}
+	case agent.EventContextCompacted:
+		if event.Error != nil {
+			m.addBlock(errorStyle.Render("✗ automatic compaction failed: " + event.Error.Error()))
+			return
+		}
+		m.addBlock(toolArrow.Render(fmt.Sprintf(
+			"⟳ context auto-compacted at ~%s tokens; the summary replaced the transcript",
+			formatTokens(event.ContextTokens))))
+		if strings.TrimSpace(event.Plan) != "" {
+			m.addBlock(m.renderAssistantMessage(event.Plan))
+		}
+		return
+	case agent.EventUsage:
+		// Token accounting updates the status line, which is rebuilt from the
+		// runtime totals on every render, so nothing to append here.
+		return
 	}
 	if event.Type == agent.EventToolCallFailed || event.Type == agent.EventToolPermissionDenied || event.Type == agent.EventHookDenied || event.Type == agent.EventHookStopped || event.Type == agent.EventRunFailed || event.Type == agent.EventRunFinished {
 		m.saveCurrentSession()

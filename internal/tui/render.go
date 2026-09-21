@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/wislist/mini-opencode/internal/agent"
+	"github.com/wislist/mini-opencode/internal/agent/tools"
 )
 
 // ── View ──────────────────────────────────────────────
@@ -35,6 +36,8 @@ func (m *Model) renderFooter() []string {
 	var sections []string
 	if m.state == statePermission && m.pendingPerm != nil {
 		sections = append(sections, m.renderPermissionPrompt())
+	} else if m.state == statePlanApproval && m.pendingPlan != nil {
+		sections = append(sections, m.renderPlanPrompt())
 	} else if m.state == stateKeyPrompt {
 		sections = append(sections, m.renderKeyPrompt())
 	} else if m.state == stateSessionList {
@@ -42,6 +45,11 @@ func (m *Model) renderFooter() []string {
 	} else {
 		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
 			sections = append(sections, m.renderCommandMenu())
+		}
+		// The todo panel sits directly above the input so the plan stays
+		// visible while the agent works.
+		if panel := m.renderTodoPanel(); panel != "" {
+			sections = append(sections, panel)
 		}
 		sections = append(sections, m.renderInputBar())
 	}
@@ -160,12 +168,14 @@ func (m *Model) renderGitSegment() string {
 	return strings.Join(parts, "")
 }
 
-// renderContextSegment renders an approximate token usage indicator.
+// renderContextSegment renders the context usage indicator. The token count
+// prefers the provider-reported prompt size, so the percentage reflects the
+// real prompt and not just a character heuristic.
 func (m *Model) renderContextSegment() string {
 	if m.runtime == nil {
 		return dimStyle.Render("ctx 0%")
 	}
-	tokens := m.runtime.ContextEstimate()
+	tokens := m.runtime.ContextTokens()
 	pct := contextPercent(tokens, m.cfg.Provider.EffectiveContextWindow())
 	return renderContextBar(pct)
 }
@@ -191,8 +201,11 @@ func (m *Model) renderPermissionPrompt() string {
 	w := boxWidth(m)
 	inner := max(1, w-4) // border(2) + padding(2)
 	content := toolName.Render(call.Name) + "\n" +
-		dimStyle.Render(wordWrap(extractToolDetail(call), inner)) + "\n" +
-		permAsk.Render("allow? [y/N]")
+		dimStyle.Render(wordWrap(extractToolDetail(call), inner)) + "\n"
+	if preview := toolDiffPreview(call, m.workingDir); preview != "" {
+		content += renderDiffLines(preview, inner) + "\n"
+	}
+	content += permAsk.Render("allow? [y] once · [a] always this session · [n] deny")
 	return permBox.Width(w).Render(content)
 }
 
@@ -275,14 +288,38 @@ func (m *Model) renderStatus() string {
 		lines = append(lines, "  "+dimStyle.Render("not a git repository"))
 	}
 	if m.runtime != nil {
-		tokens := m.runtime.ContextEstimate()
+		tokens := m.runtime.ContextTokens()
 		window := m.cfg.Provider.EffectiveContextWindow()
 		pct := contextPercent(tokens, window)
-		ctxLine := fmt.Sprintf("  %s  ~%s tokens  %.0f%% of %s  (%d messages)",
-			cmdStyle.Render("ctx"), formatTokens(tokens), pct, formatTokens(window), len(m.runtime.Messages()))
+		source := "estimated"
+		if m.runtime.Usage().PromptTokens > 0 {
+			source = "provider-reported prompt size"
+		}
+		ctxLine := fmt.Sprintf("  %s  %s tokens  %.0f%% of %s  (%d messages, %s)",
+			cmdStyle.Render("ctx"), formatTokens(tokens), pct, formatTokens(window),
+			len(m.runtime.Messages()), source)
 		for _, wl := range wrapLine(ctxLine, m.width) {
 			lines = append(lines, wl)
 		}
+		if auto := m.runtime.AutoCompactions(); auto > 0 {
+			lines = append(lines, fmt.Sprintf("  %s  %d automatic compaction(s) this session",
+				cmdStyle.Render("compacted"), auto))
+		}
+		usage := m.runtime.Usage()
+		if !usage.IsZero() {
+			usageLine := fmt.Sprintf("  %s  prompt %s  completion %s  total %s",
+				cmdStyle.Render("tokens"), formatTokens(usage.PromptTokens),
+				formatTokens(usage.CompletionTokens), formatTokens(usage.TotalTokens))
+			for _, wl := range wrapLine(usageLine, m.width) {
+				lines = append(lines, wl)
+			}
+		} else {
+			lines = append(lines, "  "+dimStyle.Render("tokens: provider reports no usage"))
+		}
+	}
+	if allowed := m.SessionAllowedTools(); len(allowed) > 0 {
+		lines = append(lines, "  "+cmdStyle.Render("allowed")+"  "+
+			dimStyle.Render("session-approved tools: "+strings.Join(allowed, ", ")))
 	}
 	w := max(1, m.width)
 	return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
@@ -295,6 +332,11 @@ func (m *Model) renderHelp() string {
 		"  " + cmdStyle.Render("/version") + " show version\n" +
 		"  " + cmdStyle.Render("/tools") + "   list registered tools\n" +
 		"  " + cmdStyle.Render("/status") + "  show git status and context usage\n" +
+		"  " + cmdStyle.Render("/mcp") + "     show MCP server status\n" +
+		"  " + cmdStyle.Render("/init") + "    analyze the repo and write AGENTS.md\n" +
+		"  " + cmdStyle.Render("/fork") + "    branch this conversation into a new session\n" +
+		"  " + cmdStyle.Render("/plan") + "    toggle plan mode (read-only analysis)\n" +
+		"  " + cmdStyle.Render("/undo") + "    restore the newest file snapshot\n" +
 		"  " + cmdStyle.Render("/session") + "  list and switch to a saved conversation\n" +
 		"  " + cmdStyle.Render("/newsession") + "  start a new conversation\n" +
 		"  " + cmdStyle.Render("/archive") + " archive current conversation to JSON\n" +
@@ -457,4 +499,105 @@ func (m *Model) renderWorkspace() string {
 		}
 	}
 	return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
+}
+
+// renderMCPStatus lists configured MCP servers and their startup result.
+func (m *Model) renderMCPStatus() string {
+	if m.mcpStatus == nil {
+		return dimStyle.Render("mcp: not configured")
+	}
+	lines := []string{toolName.Render("mcp:")}
+	statuses := m.mcpStatus()
+	if len(statuses) == 0 {
+		lines = append(lines, "  "+dimStyle.Render("no MCP servers configured (config.json -> mcpServers)"))
+	}
+	for _, status := range statuses {
+		for _, wl := range wrapLine("  "+status, max(1, m.width)) {
+			lines = append(lines, wl)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderTodoPanel renders the agent's task list above the input bar. It is
+// empty when no todo list is active.
+func (m *Model) renderTodoPanel() string {
+	if strings.TrimSpace(m.todos) == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(m.todos), "\n")
+	rendered := make([]string, 0, len(lines)+1)
+	rendered = append(rendered, keyLabel.Render("todos:"))
+	for _, line := range lines {
+		style := dimStyle
+		switch {
+		case strings.HasPrefix(line, "[x]"):
+			style = gitCleanStyle
+		case strings.HasPrefix(line, "[>]"):
+			style = permAsk
+		}
+		rendered = append(rendered, style.Render(line))
+	}
+	w := boxWidth(m)
+	inner := max(1, w-4)
+	for i, line := range rendered {
+		rendered[i] = wordWrap(line, inner)
+	}
+	return commandBox.Width(w).Render(strings.Join(rendered, "\n"))
+}
+
+// todoTextFromJSON renders a stored todo list, returning "" when empty.
+func todoTextFromJSON(raw string) string {
+	items := tools.ParseTodos(raw)
+	if len(items) == 0 {
+		return ""
+	}
+	return tools.RenderTodos(items)
+}
+
+// renderPlanPrompt shows a submitted plan and asks the user to approve it.
+// The plan is capped so a long plan cannot push the input bar off screen; the
+// full text is already in the transcript above.
+func (m *Model) renderPlanPrompt() string {
+	if m.pendingPlan == nil {
+		return ""
+	}
+	w := boxWidth(m)
+	inner := max(1, w-4)
+	const maxPlanLines = 12
+
+	planLines := strings.Split(strings.TrimSpace(m.pendingPlan.plan), "\n")
+	shown := planLines
+	truncated := 0
+	if len(planLines) > maxPlanLines {
+		shown = planLines[:maxPlanLines]
+		truncated = len(planLines) - maxPlanLines
+	}
+	content := keyLabel.Render("plan ready for approval:") + "\n"
+	for _, line := range shown {
+		content += dimStyle.Render(wordWrap(line, inner)) + "\n"
+	}
+	if truncated > 0 {
+		content += dimStyle.Render(fmt.Sprintf("… %d more lines (see the transcript)", truncated)) + "\n"
+	}
+	content += permAsk.Render("approve and start implementing? [y/N]")
+	return permBox.Width(w).Render(strings.TrimRight(content, "\n"))
+}
+
+// renderDiffLines colorizes a diff preview: removals red, additions green,
+// everything else dim.
+func renderDiffLines(preview string, width int) string {
+	var lines []string
+	for _, line := range strings.Split(preview, "\n") {
+		line = wordWrap(line, width)
+		switch {
+		case strings.HasPrefix(line, "+ "):
+			lines = append(lines, toolAddedStyle.Render(line))
+		case strings.HasPrefix(line, "- "):
+			lines = append(lines, toolRemovedStyle.Render(line))
+		default:
+			lines = append(lines, dimStyle.Render(line))
+		}
+	}
+	return strings.Join(lines, "\n")
 }

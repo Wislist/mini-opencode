@@ -1,5 +1,19 @@
+# Local build cache (the sandbox cannot write the shared Go cache).
 .gocache/
+
+# Local state and secrets.
 config.json
 .mini-opencode/
-.DS_Store
+
+# Built binaries.
 cmd/mini-opencode/mini-opencode
+/mini-opencode
+
+# macOS noise.
+.DS_Store
+
+# Throwaway test workspaces and test/profiling output.
+.smoke.*/
+*.test
+*.out
+coverage.txt

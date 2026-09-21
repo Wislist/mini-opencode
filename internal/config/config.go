@@ -7,12 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Config struct {
 	Provider   ProviderConfig             `json:"provider"`
 	MCPServers map[string]MCPServerConfig `json:"mcpServers"`
 	Workspace  WorkspaceConfig            `json:"workspace"`
+	Web        WebConfig                  `json:"web"`
+	Agent      AgentConfig                `json:"agent"`
 	// User and Assistant are the display names shown in the TUI message
 	// labels. Defaults are applied in Load when empty.
 	User      string `json:"user,omitempty"`
@@ -28,6 +31,30 @@ type ProviderConfig struct {
 	// ContextWindow is the model's max context size in tokens. When zero,
 	// EffectiveContextWindow falls back to a model-based default.
 	ContextWindow int `json:"context_window,omitempty"`
+	// TimeoutSeconds bounds a single provider request. Zero keeps the built-in
+	// default (120s).
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// MaxRetries is the retry count after a retryable failure (network error,
+	// 408/409/429/5xx). Unset uses the built-in default (2); set 0 explicitly
+	// to disable retries.
+	MaxRetries *int `json:"max_retries,omitempty"`
+}
+
+// RequestTimeout returns the configured per-request timeout, or zero when the
+// provider should apply its own default.
+func (p ProviderConfig) RequestTimeout() time.Duration {
+	if p.TimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(p.TimeoutSeconds) * time.Second
+}
+
+// Retries returns the configured retry count and whether it was set at all.
+func (p ProviderConfig) Retries() (int, bool) {
+	if p.MaxRetries == nil {
+		return 0, false
+	}
+	return *p.MaxRetries, true
 }
 
 // WorkspaceConfig controls the agent's filesystem access boundary. By default
@@ -37,6 +64,58 @@ type ProviderConfig struct {
 // subdirectory while needing access to the whole project.
 type WorkspaceConfig struct {
 	AllowedRoots []string `json:"allowed_roots"`
+	// RequireReadBeforeWrite rejects write/edit on an existing file the agent
+	// has not read in the current session. Defaults to true; set false to let
+	// the agent overwrite files it never read.
+	RequireReadBeforeWrite *bool `json:"require_read_before_write,omitempty"`
+}
+
+// ReadBeforeWrite reports whether the read-before-write rule is enabled
+// (default true).
+func (w WorkspaceConfig) ReadBeforeWrite() bool {
+	if w.RequireReadBeforeWrite == nil {
+		return true
+	}
+	return *w.RequireReadBeforeWrite
+}
+
+// AgentConfig tunes the agent loop.
+type AgentConfig struct {
+	// MaxTurns bounds how many provider turns a single run may take. Zero
+	// uses the built-in default.
+	MaxTurns int `json:"max_turns,omitempty"`
+	// CompactThreshold is the fraction of the context window that triggers
+	// automatic compaction. Zero uses the built-in default (0.85).
+	CompactThreshold float64 `json:"compact_threshold,omitempty"`
+}
+
+// DefaultMaxTurns is the turn budget of a single run.
+const DefaultMaxTurns = 100
+
+// EffectiveMaxTurns returns the configured turn budget or the default.
+func (a AgentConfig) EffectiveMaxTurns() int {
+	if a.MaxTurns > 0 {
+		return a.MaxTurns
+	}
+	return DefaultMaxTurns
+}
+
+// WebConfig configures the web tools. SearchURL is required for web_search; a
+// SearXNG instance with JSON output works, for example
+// "http://localhost:8888/search?format=json&q={query}".
+type WebConfig struct {
+	SearchURL       string `json:"search_url,omitempty"`
+	SearchAPIKey    string `json:"search_api_key,omitempty"`
+	SearchAPIKeyEnv string `json:"search_api_key_env,omitempty"`
+	TimeoutSeconds  int    `json:"timeout_seconds,omitempty"`
+}
+
+// Timeout returns the configured web request timeout, or zero for the default.
+func (w WebConfig) Timeout() time.Duration {
+	if w.TimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(w.TimeoutSeconds) * time.Second
 }
 
 type MCPServerConfig struct {

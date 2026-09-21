@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/wislist/mini-opencode/internal/agent"
+	"github.com/wislist/mini-opencode/internal/agent/tools"
 	"github.com/wislist/mini-opencode/internal/config"
 	"github.com/wislist/mini-opencode/internal/session"
 )
@@ -27,6 +29,7 @@ const (
 	stateQuitting
 	stateCompacting
 	stateSessionList
+	statePlanApproval
 )
 
 // InteractionMode toggles between plan (read-only analysis) and code
@@ -53,15 +56,40 @@ func (mode InteractionMode) String() string {
 // Messages bridging the synchronous runtime goroutine into Bubble Tea.
 type runtimeEventMsg struct{ event agent.Event }
 type runtimeDoneMsg struct{ err error }
+
+// permissionDecision is the user's verdict on a tool permission request.
+// always additionally allowlists the tool for the rest of the session.
+type permissionDecision struct {
+	allow  bool
+	always bool
+}
+
 type permissionRequestMsg struct {
 	call   agent.ToolCall
 	result *agent.ToolResult
-	resp   chan bool
+	resp   chan permissionDecision
 }
 type compactDoneMsg struct {
 	before      int
 	userSummary string
 	err         error
+}
+
+// sessionTitleMsg carries an asynchronously generated session title.
+type sessionTitleMsg struct {
+	title string
+	err   error
+}
+
+// planDecision is the user's verdict on a submitted plan.
+type planDecision struct {
+	approved bool
+	feedback string
+}
+
+type planApprovalMsg struct {
+	plan string
+	resp chan planDecision
 }
 
 // Callbacks the TUI needs from app.go.
@@ -105,8 +133,25 @@ type Model struct {
 
 	mode     InteractionMode
 	planHook *agent.PlanModeHook
+	// todos is the rendered task list shown above the input bar.
+	todos string
 
-	pendingPerm    *permissionRequestMsg
+	// mcpStatus reports the MCP server states for the /mcp command.
+	mcpStatus func() []string
+	// snapshotRestorer restores the newest file snapshot of the session.
+	snapshotRestorer func() (string, error)
+	// titleGenerator asks the provider for a short session title.
+	titleGenerator titleGenerator
+	// initPromptProvider renders the /init system prompt.
+	initPromptProvider func() (string, error)
+	// systemPromptRestore holds the prompt to restore once the /init run ends.
+	systemPromptRestore string
+
+	pendingPerm *permissionRequestMsg
+	// sessionAllowed holds tool names the user approved for the whole session
+	// ("always allow"), so repeated prompts for the same tool stop appearing.
+	sessionAllowed map[string]bool
+	pendingPlan    *planApprovalMsg
 	keySaver       KeySaver
 	nameSaver      NameSaver
 	runtimeFactory RuntimeFactory
@@ -170,12 +215,62 @@ func (m *Model) SetRuntimeFactory(rf RuntimeFactory) { m.runtimeFactory = rf }
 func (m *Model) SetCompactor(c Compactor)            { m.compactor = c }
 func (m *Model) SetSessionStore(s *session.Store)    { m.sessions = s }
 
+// CurrentSessionID returns the active session id, or "" when none exists. It
+// lets collaborators (such as the file observer) resolve the live session
+// without holding a stale pointer.
+func (m *Model) CurrentSessionID() string {
+	if m.currentSession == nil {
+		return ""
+	}
+	return m.currentSession.ID
+}
+
 // SetPlanHook attaches the agent-side plan mode enforcer. The TUI toggles
 // hook.Active when switching modes.
 func (m *Model) SetPlanHook(h *agent.PlanModeHook) { m.planHook = h }
 
+// onPlanSubmitted records the plan decision in the transcript and refreshes
+// the mode badge.
+func (m *Model) onPlanSubmitted(event agent.Event) {
+	verdict := "rejected"
+	if m.mode == ModeCode {
+		verdict = "approved"
+	}
+	m.addBlock(toolArrow.Render("⟳ plan " + verdict + " — mode is now " + m.mode.String()))
+	m.refreshViewport()
+}
+
+// todosForSession loads and renders the stored task list of a session.
+func (m *Model) todosForSession(sessionID string) string {
+	if m.sessions == nil || sessionID == "" {
+		return ""
+	}
+	return todoTextFromJSON(m.sessions.LoadTodos(sessionID))
+}
+
 // PlanHook returns the agent-side plan mode enforcer, or nil if unset.
 func (m *Model) PlanHook() *agent.PlanModeHook { return m.planHook }
+
+// SetMCPStatusProvider attaches a callback that renders MCP server status
+// lines for the /mcp command.
+func (m *Model) SetMCPStatusProvider(provider func() []string) { m.mcpStatus = provider }
+
+// SetSnapshotRestorer attaches the callback backing /undo.
+func (m *Model) SetSnapshotRestorer(restore func() (string, error)) { m.snapshotRestorer = restore }
+
+// SetTitleGenerator attaches the provider-backed session title generator.
+func (m *Model) SetTitleGenerator(g titleGenerator) { m.titleGenerator = g }
+
+// SetInitPromptProvider attaches the renderer for the /init system prompt.
+func (m *Model) SetInitPromptProvider(provider func() (string, error)) {
+	m.initPromptProvider = provider
+}
+
+// AddSystemNotice appends a dim informational line to the transcript. It is
+// used for startup diagnostics such as a failed MCP server.
+func (m *Model) AddSystemNotice(text string) {
+	m.addBlock(dimStyle.Render("! " + text))
+}
 
 // toggleMode switches between plan and code mode, updating the hook state.
 func (m *Model) toggleMode() {
@@ -189,17 +284,77 @@ func (m *Model) toggleMode() {
 	}
 	m.refreshViewport()
 }
+
+// MakePlanApprover returns the approver handed to the exit_plan_mode tool. It
+// shows the plan in the TUI, waits for the user's verdict, and turns plan mode
+// off when the plan is approved so the run can continue into implementation.
+func (m *Model) MakePlanApprover() tools.PlanApprover {
+	return planApproverFunc(func(ctx context.Context, plan string) (bool, string) {
+		resp := make(chan planDecision, 1)
+		m.program.Send(planApprovalMsg{plan: plan, resp: resp})
+		select {
+		case <-ctx.Done():
+			return false, ""
+		case decision := <-resp:
+			if decision.approved {
+				m.mode = ModeCode
+				if m.planHook != nil {
+					m.planHook.Active = false
+				}
+			}
+			return decision.approved, decision.feedback
+		}
+	})
+}
+
+// planApproverFunc adapts a function to the tools.PlanApprover interface.
+type planApproverFunc func(ctx context.Context, plan string) (bool, string)
+
+func (f planApproverFunc) ApprovePlan(ctx context.Context, plan string) (bool, string) {
+	return f(ctx, plan)
+}
+
 func (m *Model) MakeConfirmer() agent.PermissionConfirmer {
 	return func(ctx context.Context, call agent.ToolCall, result agent.ToolResult) bool {
-		resp := make(chan bool, 1)
+		if m.isSessionAllowed(call.Name) {
+			return true
+		}
+		resp := make(chan permissionDecision, 1)
 		m.program.Send(permissionRequestMsg{call: call, result: &result, resp: resp})
 		select {
 		case <-ctx.Done():
 			return false
-		case ok := <-resp:
-			return ok
+		case decision := <-resp:
+			// The UI handler records session-wide approvals when it answers.
+			return decision.allow
 		}
 	}
+}
+
+// isSessionAllowed reports whether the user allowlisted this tool.
+func (m *Model) isSessionAllowed(name string) bool {
+	return m.sessionAllowed[name]
+}
+
+// allowToolForSession records a session-wide approval for one tool.
+func (m *Model) allowToolForSession(name string) {
+	if m.sessionAllowed == nil {
+		m.sessionAllowed = map[string]bool{}
+	}
+	m.sessionAllowed[name] = true
+}
+
+// SessionAllowedTools lists the allowlisted tool names, sorted.
+func (m *Model) SessionAllowedTools() []string {
+	if len(m.sessionAllowed) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m.sessionAllowed))
+	for name := range m.sessionAllowed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -241,6 +396,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case runtimeEventMsg:
+		if msg.event.Type == agent.EventTodosChanged {
+			m.todos = msg.event.Todos
+			m.refreshViewport()
+			break
+		}
+		if msg.event.Type == agent.EventPlanSubmitted {
+			m.onPlanSubmitted(msg.event)
+			break
+		}
 		m.handleRuntimeEvent(msg.event)
 
 	case runtimeDoneMsg:
@@ -248,11 +412,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.addBlock(errorStyle.Render("✗ " + msg.err.Error()))
 		}
+		if m.systemPromptRestore != "" && m.runtime != nil {
+			// /init runs with a different system prompt; put the normal one
+			// back as soon as that run is over.
+			m.runtime.SetSystemPrompt(m.systemPromptRestore)
+			m.systemPromptRestore = ""
+		}
 		m.saveCurrentSession()
+		if cmd := m.maybeGenerateTitle(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		m.gitStatus = collectGitStatus(m.workingDir)
 		m.refreshViewport()
 		m.input.Focus()
 		cmds = append(cmds, textinput.Blink)
+
+	case sessionTitleMsg:
+		if msg.err == nil && msg.title != "" && m.currentSession != nil {
+			m.currentSession.Title = msg.title
+			m.saveCurrentSession()
+			m.refreshViewport()
+		}
 
 	case compactDoneMsg:
 		m.state = stateIdle
@@ -294,10 +474,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentSession = msg.sess
 			if m.runtime != nil {
 				m.runtime.SetMessages(msg.sess.Messages)
+				m.runtime.SetUsage(agent.Usage{
+					PromptTokens:     int(msg.sess.PromptTokens),
+					CompletionTokens: int(msg.sess.CompletionTokens),
+					TotalTokens:      int(msg.sess.PromptTokens + msg.sess.CompletionTokens),
+				})
 			}
 			m.blocks = nil
 			m.streamingIdx = -1
 			m.streamingText = ""
+			m.todos = m.todosForSession(msg.sess.ID)
 			m.addBlock(dimStyle.Render("session: " + msg.sess.Title))
 			m.renderHistoryIntoBlocks(msg.sess.Messages)
 			m.gitStatus = collectGitStatus(m.workingDir)
@@ -309,6 +495,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case permissionRequestMsg:
 		m.pendingPerm = &msg
 		m.state = statePermission
+		m.refreshViewport()
+
+	case planApprovalMsg:
+		m.pendingPlan = &msg
+		m.state = statePlanApproval
 		m.refreshViewport()
 
 	case tea.KeyMsg:

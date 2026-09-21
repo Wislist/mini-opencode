@@ -64,6 +64,11 @@ func (t *EditTool) Run(_ context.Context, input agent.ToolInput) (agent.ToolOutp
 	if isLikelyBinary(data) {
 		return agent.ToolOutput{}, fmt.Errorf("edit: refusing to edit binary file: %s", path)
 	}
+	// An edit rewrites an existing file, so it must have been read first and
+	// its previous content is snapshotted before the replacement is applied.
+	if err := checkReadBeforeWrite(t.options, path, true); err != nil {
+		return agent.ToolOutput{}, fmt.Errorf("edit: %w", err)
+	}
 	content := string(data)
 	count := strings.Count(content, args.OldString)
 	if count == 0 {
@@ -73,6 +78,7 @@ func (t *EditTool) Run(_ context.Context, input agent.ToolInput) (agent.ToolOutp
 		return agent.ToolOutput{}, fmt.Errorf("edit: old_string appears %d times", count)
 	}
 	updated := strings.Replace(content, args.OldString, args.NewString, 1)
+	observeSnapshot(t.options.Observer, path, data)
 	if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
 		return agent.ToolOutput{}, fmt.Errorf("edit: %w", err)
 	}
@@ -81,6 +87,9 @@ func (t *EditTool) Run(_ context.Context, input agent.ToolInput) (agent.ToolOutp
 		Metadata: map[string]any{
 			"path":         path,
 			"replacements": 1,
+			"snapshot":     true,
+			"old_string":   args.OldString,
+			"new_string":   args.NewString,
 		},
 	}, nil
 }
