@@ -19,16 +19,15 @@ type TodoStore interface {
 	Save(todosJSON string) error
 }
 
-// TodoItem is one checklist entry.
-type TodoItem struct {
-	Content string `json:"content"`
-	Status  string `json:"status"`
-}
+// TodoItem and the status values live in the agent package so the run loop can
+// read the task list without importing this package. These aliases keep the
+// tool-facing API unchanged.
+type TodoItem = agent.TodoItem
 
 const (
-	TodoPending    = "pending"
-	TodoInProgress = "in_progress"
-	TodoCompleted  = "completed"
+	TodoPending    = agent.TodoPending
+	TodoInProgress = agent.TodoInProgress
+	TodoCompleted  = agent.TodoCompleted
 )
 
 // TodoWriteTool lets the agent keep an explicit task list for multi-step work.
@@ -129,49 +128,17 @@ func (t *TodoWriteTool) Run(_ context.Context, input agent.ToolInput) (agent.Too
 }
 
 func normalizeTodoStatus(status string) string {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case TodoInProgress, "in-progress", "doing":
-		return TodoInProgress
-	case TodoCompleted, "done", "complete":
-		return TodoCompleted
-	default:
-		return TodoPending
-	}
+	return agent.NormalizeTodoStatus(status)
 }
 
 // RenderTodos renders a todo list as a compact checklist. Done items are kept
 // so the user can see what has already happened.
 func RenderTodos(items []TodoItem) string {
-	if len(items) == 0 {
-		return "todo list cleared"
-	}
-	var b strings.Builder
-	done := 0
-	for _, item := range items {
-		switch item.Status {
-		case TodoCompleted:
-			done++
-			fmt.Fprintf(&b, "[x] %s\n", item.Content)
-		case TodoInProgress:
-			fmt.Fprintf(&b, "[>] %s\n", item.Content)
-		default:
-			fmt.Fprintf(&b, "[ ] %s\n", item.Content)
-		}
-	}
-	fmt.Fprintf(&b, "(%d/%d done)", done, len(items))
-	return strings.TrimRight(b.String(), "\n")
+	return agent.RenderTodos(items)
 }
 
 // ParseTodos decodes a stored todo list, returning nil for empty or invalid
 // payloads.
 func ParseTodos(raw string) []TodoItem {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "[]" {
-		return nil
-	}
-	var items []TodoItem
-	if err := json.Unmarshal([]byte(raw), &items); err != nil {
-		return nil
-	}
-	return items
+	return agent.ParseTodos(raw)
 }

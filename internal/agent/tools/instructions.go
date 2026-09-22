@@ -31,6 +31,7 @@ var instructionFileByTool = map[string]string{
 	JobOutputToolName:    "job_output.md",
 	JobKillToolName:      "job_kill.md",
 	InstallSkillToolName: "install_skill.md",
+	MemoryToolName:       "memory.md",
 }
 
 func DefaultInstructionData() InstructionData {

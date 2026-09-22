@@ -58,6 +58,7 @@ func CodingTools(options CodingToolOptions) []agent.Tool {
 		}),
 		NewInstallSkillTool(fileOptions),
 		NewTodoWriteTool(TodoWriteOptions{Store: options.Todos}),
+		NewTodoBlockedTool(),
 		NewExitPlanModeTool(ExitPlanModeOptions{Approver: options.PlanApprover}),
 		NewWebFetchTool(options.Web),
 	}
