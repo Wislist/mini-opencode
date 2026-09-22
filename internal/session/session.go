@@ -144,6 +144,10 @@ type Store struct {
 	mu     sync.Mutex
 	db     *sql.DB
 	broker *Broker
+	// searchErr records why full-text search is unavailable (an FTS5-less
+	// SQLite build, or a failed index setup). Nil means search works. It is
+	// guarded by mu like the rest of the connection state.
+	searchErr error
 }
 
 // NewStore returns a Store rooted at workingDir. Active session data is saved
@@ -524,7 +528,12 @@ func (s *Store) initSchemaLocked() error {
 	if err := s.importLegacyDBRowsLocked(); err != nil {
 		return err
 	}
-	return s.importLegacyJSONOnceLocked()
+	if err := s.importLegacyJSONOnceLocked(); err != nil {
+		return err
+	}
+	// Search setup runs last so the backfill sees every imported message. A
+	// missing FTS5 is recorded in searchErr instead of failing the store.
+	return s.initSearchLocked()
 }
 
 // dropRetiredTriggersLocked removes the message_count triggers installed by
