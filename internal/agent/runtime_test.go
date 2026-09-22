@@ -239,18 +239,31 @@ func TestRuntimeCompactSummarizesAndReplacesMessages(t *testing.T) {
 		t.Fatalf("summary = %q", summary)
 	}
 
+	// Compaction is non-destructive: the original transcript is retained and
+	// the summary is appended, so a later reload or re-summarization still has
+	// the full conversation. Only the view sent to the provider is truncated.
 	after := runtime.Messages()
-	if len(after) != 1 {
-		t.Fatalf("after compact message count = %d, want 1", len(after))
+	if len(after) != before+1 {
+		t.Fatalf("after compact message count = %d, want %d (original + summary)", len(after), before+1)
 	}
-	if after[0].Role != RoleUser {
-		t.Fatalf("after compact role = %s, want user", after[0].Role)
+	summaryMsg := after[len(after)-1]
+	if !strings.Contains(summaryMsg.Content, "SUMMARY: user uppercased hello") {
+		t.Fatalf("after compact content = %q", summaryMsg.Content)
 	}
-	if !strings.Contains(after[0].Content, "SUMMARY: user uppercased hello") {
-		t.Fatalf("after compact content = %q", after[0].Content)
+	if !strings.Contains(summaryMsg.Content, "<conversation_summary>") {
+		t.Fatalf("after compact content missing summary tags: %q", summaryMsg.Content)
 	}
-	if !strings.Contains(after[0].Content, "<conversation_summary>") {
-		t.Fatalf("after compact content missing summary tags: %q", after[0].Content)
+	// The provider-facing view starts at the summary and is rewritten to the
+	// user role, so a request never opens with an assistant turn.
+	_, sent := runtime.promptState()
+	if len(sent) != 1 {
+		t.Fatalf("promptState sent %d messages, want only the summary", len(sent))
+	}
+	if sent[0].Role != RoleUser {
+		t.Fatalf("promptState role = %s, want user", sent[0].Role)
+	}
+	if !strings.Contains(sent[0].Content, "SUMMARY: user uppercased hello") {
+		t.Fatalf("promptState content = %q", sent[0].Content)
 	}
 }
 
@@ -625,6 +638,51 @@ func TestContextTokensPrefersProviderReportedPromptSize(t *testing.T) {
 	}
 }
 
+// A session saved by a huge conversation carries its old prompt size. Loading
+// it must not treat that number as the size of the newly loaded transcript, or
+// the small session is reported (and compacted) as if it were still huge.
+func TestContextTokensClearedOnSessionRestore(t *testing.T) {
+	rt := NewRuntime(&scriptedProvider{})
+	rt.SetContextTokens(950_000)
+	if got := rt.ContextTokens(); got != 950_000 {
+		t.Fatalf("ContextTokens() = %d, want the provider number", got)
+	}
+
+	rt.SetMessages([]Message{
+		{Role: RoleUser, Content: "hi"},
+		{Role: RoleAssistant, Content: "hello"},
+	})
+	rt.SetContextTokens(0)
+	if got, want := rt.ContextTokens(), rt.ContextEstimate(); got != want {
+		t.Fatalf("ContextTokens() = %d after restore, want the fresh estimate %d", got, want)
+	}
+}
+
+// WithContextWindow(1000) puts the threshold at 850 tokens, so the stale number
+// alone crosses it while the restored transcript does not.
+func TestRestoredSmallSessionIsNotCompacted(t *testing.T) {
+	rt := NewRuntime(&scriptedProvider{}, WithContextWindow(1000), WithCompactionPrompt("summarize"))
+	// Setup: a previous, large conversation with two messages.
+	rt.SetMessages([]Message{
+		{Role: RoleUser, Content: "old"},
+		{Role: RoleAssistant, Content: "old"},
+	})
+	rt.SetContextTokens(950)
+	if !rt.needsCompaction() {
+		t.Fatal("setup: the stale number should cross the threshold")
+	}
+
+	// Switching to a smaller saved session must not inherit that number.
+	rt.SetMessages([]Message{
+		{Role: RoleUser, Content: "hi"},
+		{Role: RoleAssistant, Content: "hello"},
+	})
+	rt.SetContextTokens(0)
+	if rt.needsCompaction() {
+		t.Fatalf("a freshly restored small session should not need compaction (reports %d tokens)", rt.ContextTokens())
+	}
+}
+
 func TestContextEstimateCountsCJKRunes(t *testing.T) {
 	rt := NewRuntime(&scriptedProvider{})
 	// 40 CJK characters are ~40 tokens; the old byte/4 heuristic would have
@@ -670,13 +728,62 @@ func TestRuntimeAutoCompactsWhenContextNearsWindow(t *testing.T) {
 	if rt.AutoCompactions() != 1 {
 		t.Fatalf("AutoCompactions() = %d, want 1", rt.AutoCompactions())
 	}
-	// The transcript was replaced by the single summary message.
+	// The retained transcript still holds the original turns plus the summary
+	// (the run continues afterwards, so the summary is not necessarily last).
 	messages := rt.Messages()
-	if len(messages) != 2 {
-		t.Fatalf("messages after compaction = %d, want the summary plus the final turn", len(messages))
+	if len(messages) < 2 {
+		t.Fatalf("messages after compaction = %d, want the retained history plus the summary", len(messages))
 	}
-	if !strings.Contains(messages[0].Content, "<conversation_summary>") {
-		t.Fatalf("first message is not the summary: %q", messages[0].Content)
+	summaryAt := -1
+	for i, msg := range messages {
+		if strings.Contains(msg.Content, "<conversation_summary>") {
+			summaryAt = i
+			break
+		}
+	}
+	if summaryAt == -1 {
+		t.Fatalf("no summary retained in the transcript: %#v", messages)
+	}
+	if !strings.Contains(messages[summaryAt].Content, "<conversation_summary>") {
+		t.Fatalf("retained summary message = %q", messages[summaryAt].Content)
+	}
+	_, sent := rt.promptState()
+	if !strings.Contains(sent[0].Content, "<conversation_summary>") {
+		t.Fatalf("provider view does not start at the summary: %q", sent[0].Content)
+	}
+	if sent[0].Role != RoleUser {
+		t.Fatalf("provider view role = %s, want user", sent[0].Role)
+	}
+}
+
+func TestRuntimeSetMessagesResetsCompactionAccounting(t *testing.T) {
+	first := toolCallResponse("uppercase")
+	first.Usage = Usage{PromptTokens: 90, CompletionTokens: 5, TotalTokens: 95}
+	provider := &scriptedProvider{responses: []AssistantResponse{
+		first,
+		{Content: "## User summary\nWork continues from the summary."},
+		{Content: "finished after compaction"},
+	}}
+	rt := NewRuntime(provider,
+		WithTool(uppercaseTool{}),
+		WithContextWindow(100),
+		WithCompactionPrompt("summarize the conversation"),
+	)
+	if err := rt.Run(context.Background(), "long task", func(Event) {}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if rt.AutoCompactions() != 1 {
+		t.Fatalf("AutoCompactions() = %d, want 1 before restore", rt.AutoCompactions())
+	}
+
+	// Restoring a saved session must not inherit the previous conversation's
+	// measurements, or the freshly loaded context would be compacted again.
+	rt.SetMessages([]Message{{Role: RoleUser, Content: "restored task"}})
+	if got := rt.AutoCompactions(); got != 0 {
+		t.Fatalf("AutoCompactions() = %d after SetMessages, want 0", got)
+	}
+	if got := rt.ContextTokens(); got != rt.ContextEstimate() {
+		t.Fatalf("ContextTokens() = %d after SetMessages, want the fresh estimate %d", got, rt.ContextEstimate())
 	}
 }
 

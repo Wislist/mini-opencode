@@ -107,8 +107,8 @@ func TestEffectiveContextWindowUsesConfiguredValue(t *testing.T) {
 
 func TestEffectiveContextWindowFallsBackToModelDefault(t *testing.T) {
 	cfg := ProviderConfig{Model: "deepseek-chat"}
-	if got := cfg.EffectiveContextWindow(); got != 64000 {
-		t.Fatalf("EffectiveContextWindow() = %d, want 64000", got)
+	if got := cfg.EffectiveContextWindow(); got != 1048576 {
+		t.Fatalf("EffectiveContextWindow() = %d, want 1048576", got)
 	}
 }
 

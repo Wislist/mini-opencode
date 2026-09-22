@@ -87,6 +87,29 @@ type AgentConfig struct {
 	// CompactThreshold is the fraction of the context window that triggers
 	// automatic compaction. Zero uses the built-in default (0.85).
 	CompactThreshold float64 `json:"compact_threshold,omitempty"`
+	// RunRetries is how many times a failed turn is retried before the run
+	// fails. Unset uses the built-in default (2); 0 disables run-level retries
+	// (the provider still retries retryable HTTP failures on its own).
+	RunRetries *int `json:"run_retries,omitempty"`
+	// TodoChain drives the session task list to completion without waiting for
+	// the user between items. Defaults to true.
+	TodoChain *bool `json:"todo_chain,omitempty"`
+}
+
+// Retries returns the configured run-level retry count and whether it was set.
+func (a AgentConfig) Retries() (int, bool) {
+	if a.RunRetries == nil {
+		return 0, false
+	}
+	return *a.RunRetries, true
+}
+
+// TodoChainEnabled reports whether the todo chain is on (default true).
+func (a AgentConfig) TodoChainEnabled() bool {
+	if a.TodoChain == nil {
+		return true
+	}
+	return *a.TodoChain
 }
 
 // DefaultMaxTurns is the turn budget of a single run.
@@ -231,9 +254,9 @@ func (c ProviderConfig) EffectiveContextWindow() int {
 func DefaultContextWindow(model string) int {
 	switch strings.ToLower(model) {
 	case "deepseek-chat":
-		return 64000
+		return 1048576
 	case "deepseek-reasoner", "deepseek-coder":
-		return 64000
+		return 1048576
 	case "gpt-4o", "gpt-4o-mini":
 		return 128000
 	case "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano":

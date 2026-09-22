@@ -97,6 +97,17 @@ const (
 	// EventProviderWarning fires for a non-fatal provider problem, such as a
 	// stream chunk that could not be parsed.
 	EventProviderWarning EventType = "provider_warning"
+	// EventRunRetry fires when a failed turn is retried without losing the
+	// transcript.
+	EventRunRetry EventType = "run_retry"
+	// EventTodoContinuation fires when the run pushes itself forward to the
+	// next outstanding task instead of stopping.
+	EventTodoContinuation EventType = "todo_continuation"
+	// EventTodoBlocked fires when the agent reports a blocker through
+	// todo_blocked; it ends the todo chain.
+	EventTodoBlocked EventType = "todo_blocked"
+	// EventTodoChainStopped fires when the stall guard ends the chain.
+	EventTodoChainStopped EventType = "todo_chain_stopped"
 )
 
 type Event struct {
@@ -116,4 +127,10 @@ type Event struct {
 	// ContextTokens is set on EventContextCompacted: the context size that
 	// triggered compaction.
 	ContextTokens int
+	// Attempt is set on EventRunRetry: the 1-based retry number.
+	Attempt int
+	// Todos is also set on todo events so the UI can refresh in place.
+	// BlockedReason and BlockedNeeds are set on EventTodoBlocked.
+	BlockedReason string
+	BlockedNeeds  string
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Runtime struct {
@@ -39,16 +40,44 @@ type Runtime struct {
 	lastPromptTokens int
 	// autoCompactions counts automatic compactions performed in this runtime.
 	autoCompactions int
+	// todoReader supplies the task list driving the todo chain. Nil keeps the
+	// run single-shot: the agent finishes its turn and the run ends.
+	todoReader TodoReader
+	// runRetries is how many times a failed turn is retried before the run
+	// fails, on top of the provider's own HTTP-level retries.
+	runRetries int
+	// blockedReason and blockedNeeds record a blocker reported through
+	// todo_blocked, which ends the todo chain for this run.
+	blockedReason string
+	blockedNeeds  string
+	// retrySleep is the wait between run-level retries. Indirected so tests do
+	// not have to sleep through the backoff.
+	retrySleep func(ctx context.Context, d time.Duration) error
 	// postCompactTokens is the context size right after the last compaction.
 	// A further automatic compaction requires meaningful growth beyond it, so a
 	// summary that is itself larger than the threshold cannot make the runtime
 	// compact on every single turn.
 	postCompactTokens int
+	// summaryIndex is the position in messages of the newest compaction
+	// summary, or -1 when the conversation has never been compacted. Messages
+	// before it are retained but no longer sent to the provider, which is what
+	// makes compaction non-destructive.
+	summaryIndex int
 }
 
 // compactionGrowthFraction is how much new context must accumulate after a
 // compaction before another automatic compaction is allowed.
 const compactionGrowthFraction = 0.1
+
+// Compaction headroom constants. A window larger than
+// largeContextWindowThreshold keeps a flat token buffer; a smaller one keeps a
+// proportional share of the window. Both describe how much free space must
+// remain, not how much may be used.
+const (
+	largeContextWindowThreshold = 200_000
+	largeContextWindowBuffer    = 20_000
+	smallContextWindowRatio     = 0.2
+)
 
 type PermissionConfirmer func(ctx context.Context, call ToolCall, result ToolResult) bool
 
@@ -62,6 +91,9 @@ func NewRuntime(provider Provider, opts ...RuntimeOption) *Runtime {
 		tools:        tools,
 		toolService:  NewRegistryToolService(tools),
 		maxTurns:     100,
+		runRetries:   DefaultRunRetries,
+		retrySleep:   sleepContext,
+		summaryIndex: -1,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -147,6 +179,62 @@ func (r *Runtime) ContextTokens() int {
 	return r.contextTokensLocked()
 }
 
+// ContextBreakdown separates the two parts of the prompt: the fixed system
+// prompt plus tool schemas, and the conversation itself.
+//
+// The split matters for display. The system prompt is large by nature — the
+// coder template, tool instructions, AGENTS.md and skills together reach tens
+// of kilobytes — and it is present in every request, so it forms a floor that
+// never drops. Showing only the total makes a cleared conversation look like
+// nothing happened: after /newsession the total barely moves because the floor
+// dominates it.
+type ContextBreakdown struct {
+	// SystemTokens is the system prompt estimate. It is always a character
+	// estimate, because the provider reports only the whole prompt.
+	SystemTokens int
+	// ConversationTokens is the transcript size that would be sent: the
+	// messages after the compaction marker.
+	ConversationTokens int
+	// Reported is the prompt size the provider reported for the last
+	// completion, or 0 when it has not reported one yet.
+	Reported int
+}
+
+// Total is the prompt size the provider would see, preferring the reported
+// figure once it exceeds the estimate.
+func (b ContextBreakdown) Total() int {
+	estimate := b.SystemTokens + b.ConversationTokens
+	if b.Reported > estimate {
+		return b.Reported
+	}
+	return estimate
+}
+
+// ContextDetails returns the system/conversation split behind ContextTokens.
+func (r *Runtime) ContextDetails() ContextBreakdown {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return ContextBreakdown{
+		SystemTokens:       estimateTokens(r.systemPrompt),
+		ConversationTokens: r.conversationTokensLocked(),
+		Reported:           r.lastPromptTokens,
+	}
+}
+
+// conversationTokensLocked estimates only the transcript that is actually sent,
+// excluding the system prompt. Callers must hold mu.
+func (r *Runtime) conversationTokensLocked() int {
+	total := 0
+	for _, msg := range r.messages[min(r.summaryOrZero(), len(r.messages)):] {
+		total += estimateTokens(msg.Content)
+		total += estimateTokens(msg.ToolCallID)
+		for _, call := range msg.ToolCalls {
+			total += estimateTokens(call.ID) + estimateTokens(call.Name) + estimateTokens(string(call.Arguments))
+		}
+	}
+	return total
+}
+
 // contextTokensLocked is contextTokens without locking; callers must hold mu.
 func (r *Runtime) contextTokensLocked() int {
 	estimate := r.contextEstimateLocked()
@@ -156,11 +244,16 @@ func (r *Runtime) contextTokensLocked() int {
 	return estimate
 }
 
-// SetContextTokens restores the provider-reported prompt size, used when a
-// saved session is loaded back.
+// SetContextTokens records a provider-reported prompt size. A stored session
+// carries the number its previous runtime ended on, and a caller that only
+// knows the transcript has no number to pass, so zero clears the field and lets
+// the runtime fall back to its own estimate.
 func (r *Runtime) SetContextTokens(tokens int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if tokens < 0 {
+		tokens = 0
+	}
 	r.lastPromptTokens = tokens
 }
 
@@ -172,16 +265,21 @@ func (r *Runtime) needsCompaction() bool {
 }
 
 // needsCompactionLocked is needsCompaction without locking.
+//
+// The trigger is expressed as remaining headroom rather than as a fraction
+// already consumed, because the two behave differently as a window grows. On a
+// large window a fixed fraction leaves a huge, effectively wasted margin; on a
+// small window a fixed token buffer would be a large share of the window. So a
+// window above largeContextWindowThreshold keeps a flat buffer, and a smaller
+// one keeps a proportional share. This mirrors how Crush sizes the same
+// decision.
 func (r *Runtime) needsCompactionLocked() bool {
 	if r.contextWindow <= 0 || r.compactionPrompt == "" || len(r.messages) < 2 {
 		return false
 	}
-	threshold := r.compactThreshold
-	if threshold <= 0 {
-		threshold = DefaultCompactThreshold
-	}
 	tokens := r.contextTokensLocked()
-	if float64(tokens) < float64(r.contextWindow)*threshold {
+	remaining := r.contextWindow - tokens
+	if remaining > r.compactionHeadroom() {
 		return false
 	}
 	if r.postCompactTokens > 0 {
@@ -194,6 +292,45 @@ func (r *Runtime) needsCompactionLocked() bool {
 		}
 	}
 	return true
+}
+
+// compactionHeadroom is how much of the window must stay free before a request
+// is considered too close to the limit. An explicit compact_threshold keeps the
+// old "fraction consumed" meaning, so existing configs are unaffected; when it
+// is unset the remaining-buffer rule applies.
+func (r *Runtime) compactionHeadroom() int {
+	if r.compactThreshold > 0 {
+		return r.contextWindow - int(float64(r.contextWindow)*r.compactThreshold)
+	}
+	if r.contextWindow > largeContextWindowThreshold {
+		return largeContextWindowBuffer
+	}
+	return int(float64(r.contextWindow) * smallContextWindowRatio)
+}
+
+// WithTodoReader enables the todo chain: while the session task list still has
+// outstanding items, the run pushes itself forward to the next one instead of
+// stopping and waiting for the user.
+func WithTodoReader(reader TodoReader) RuntimeOption {
+	return func(r *Runtime) {
+		if reader != nil {
+			r.todoReader = reader
+		}
+	}
+}
+
+// DefaultRunRetries is the number of whole-turn retries after a provider
+// failure, on top of the provider's internal HTTP retries.
+const DefaultRunRetries = 2
+
+// WithRunRetries sets how many times a failed turn is retried. Zero disables
+// run-level retries.
+func WithRunRetries(retries int) RuntimeOption {
+	return func(r *Runtime) {
+		if retries >= 0 {
+			r.runRetries = retries
+		}
+	}
 }
 
 func WithMaxTurns(maxTurns int) RuntimeOption {
@@ -232,16 +369,47 @@ func WithPermissionConfirmer(confirmer PermissionConfirmer) RuntimeOption {
 
 // SetMessages replaces the conversation history. It is used to restore a
 // saved session into the runtime.
+//
+// The compaction accounting is reset as well. The token counts and the
+// post-compaction baseline describe the previous conversation, so carrying
+// them into a different one makes needsCompaction report true on the very
+// first turn and compact the freshly loaded context again and again instead
+// of answering.
 func (r *Runtime) SetMessages(messages []Message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.replaceMessagesLocked(messages)
+	r.resetCompactionStateLocked()
 }
 
-// replaceMessagesLocked swaps the transcript for a copy of messages.
+// resetCompactionStateLocked drops the measurements that describe the previous
+// conversation. Callers must hold mu.
+func (r *Runtime) resetCompactionStateLocked() {
+	r.lastPromptTokens = 0
+	r.postCompactTokens = 0
+	r.autoCompactions = 0
+}
+
+// replaceMessagesLocked swaps the transcript for a copy of messages. The new
+// transcript may already contain a compaction summary (a session reloaded after
+// a compaction), so the marker is re-derived from the content rather than
+// assumed absent.
 func (r *Runtime) replaceMessagesLocked(messages []Message) {
 	r.messages = make([]Message, len(messages))
 	copy(r.messages, messages)
+	r.summaryIndex = -1
+	for i, msg := range r.messages {
+		if isCompactSummaryContent(msg.Content) {
+			r.summaryIndex = i
+		}
+	}
+}
+
+// isCompactSummaryContent reports whether content is a compaction summary. The
+// runtime owns this format, so it can detect its own markers without asking the
+// session package.
+func isCompactSummaryContent(content string) bool {
+	return strings.Contains(content, "<conversation_summary>")
 }
 
 // appendMessage records one message in the transcript.
@@ -254,11 +422,24 @@ func (r *Runtime) appendMessage(msg Message) {
 // promptState returns the prompt pieces the provider request needs. Reading
 // them together keeps a turn self-consistent even if a UI goroutine loads
 // another session halfway through.
+//
+// When the conversation has been compacted, the transcript is truncated at the
+// newest summary: everything before it is retained in memory (and on disk) but
+// no longer sent, which is what keeps compaction non-destructive. The summary
+// is rewritten to the user role because a request must not start with an
+// assistant turn.
 func (r *Runtime) promptState() (string, []Message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]Message, len(r.messages))
-	copy(out, r.messages)
+	start := 0
+	if r.summaryIndex >= 0 && r.summaryIndex < len(r.messages) {
+		start = r.summaryIndex
+	}
+	out := make([]Message, len(r.messages)-start)
+	copy(out, r.messages[start:])
+	if start > 0 && len(out) > 0 {
+		out[0].Role = RoleUser
+	}
 	return r.systemPrompt, out
 }
 
@@ -323,17 +504,20 @@ func (r *Runtime) ContextEstimate() int {
 	return r.contextEstimateLocked()
 }
 
-// contextEstimateLocked is ContextEstimate without locking.
+// contextEstimateLocked is ContextEstimate without locking. Only the messages
+// actually sent to the provider are counted: after a compaction the pre-summary
+// history is retained but not transmitted, so counting it would report a context
+// far larger than the request and re-trigger compaction on every turn.
 func (r *Runtime) contextEstimateLocked() int {
-	total := estimateTokens(r.systemPrompt)
-	for _, msg := range r.messages {
-		total += estimateTokens(msg.Content)
-		total += estimateTokens(msg.ToolCallID)
-		for _, call := range msg.ToolCalls {
-			total += estimateTokens(call.ID) + estimateTokens(call.Name) + estimateTokens(string(call.Arguments))
-		}
+	return estimateTokens(r.systemPrompt) + r.conversationTokensLocked()
+}
+
+// summaryOrZero is the active truncation start, or 0 when never compacted.
+func (r *Runtime) summaryOrZero() int {
+	if r.summaryIndex < 0 {
+		return 0
 	}
-	return total
+	return r.summaryIndex
 }
 
 // estimateTokens approximates the token count of a string.
@@ -364,27 +548,41 @@ type CompactResult struct {
 	UserSummary string
 }
 
-// Compact asks the provider to summarize the current conversation and replaces
-// the message history with a single summary message. The summaryPrompt is the
-// instruction prompt (e.g. from the summary template) describing how to summarize.
-// It returns the generated summary text.
+// compactPromptSuffix closes the summarization instruction with the task list
+// so the summary always carries the outstanding work forward. Keeping this in
+// the instruction (rather than only in the transcript) makes the model record
+// statuses even when the list is long.
+const compactPromptSuffix = "\n\nInclude these tasks and their statuses in your summary. " +
+	"Instruct the resuming assistant to use the `todo_write` tool to continue tracking progress on these tasks."
+
+// Compact asks the provider to summarize the current conversation. The
+// summaryPrompt is the instruction prompt (e.g. from the summary template)
+// describing how to summarize. It returns the generated summary text.
 func (r *Runtime) Compact(ctx context.Context, summaryPrompt string) (string, error) {
 	result, err := r.CompactDetailed(ctx, summaryPrompt)
 	return result.Summary, err
 }
 
-// CompactDetailed is like Compact, but also returns the prompt-requested
-// user-facing summary section so the UI can acknowledge what was preserved
-// without dumping the full compacted context.
+// CompactDetailed summarizes the conversation and installs the result as the
+// new head of the transcript. Compaction is non-destructive: the summary is
+// appended as an assistant message and SummaryMessageID marks it, so the
+// messages before it stay in the transcript (and in the store) and a later
+// promptState simply stops at the marker. That keeps /undo, session reload and
+// a re-summarization of the original conversation possible after a compaction.
+//
+// It also returns the prompt-requested user-facing summary section so the UI
+// can acknowledge what was preserved without dumping the full compacted context.
 func (r *Runtime) CompactDetailed(ctx context.Context, summaryPrompt string) (CompactResult, error) {
 	history := r.Messages()
 	if len(history) == 0 {
 		return CompactResult{}, nil
 	}
+
+	instruction := summaryPrompt + r.compactTodoSuffix()
 	// The provider call happens without the lock so a UI goroutine can still
 	// read state while a long summary is generated.
 	resp, err := r.provider.Complete(ctx, Request{
-		SystemPrompt: summaryPrompt,
+		SystemPrompt: instruction,
 		Messages:     history,
 	})
 	if err != nil {
@@ -397,15 +595,43 @@ func (r *Runtime) CompactDetailed(ctx context.Context, summaryPrompt string) (Co
 	if !resp.Usage.IsZero() {
 		r.addUsage(resp.Usage)
 	}
+
 	r.mu.Lock()
-	r.replaceMessagesLocked([]Message{{
-		Role: RoleUser,
+	// A compaction chain: the summary is appended after the previous one, so
+	// the marker moves forward and every earlier summary is dropped from the
+	// prompt by the same truncation rule. The assistant role matches how the
+	// provider produced it; promptState rewrites it to user when sending.
+	r.messages = append(r.messages, Message{
+		Role: RoleAssistant,
 		Content: "<conversation_summary>\n" + summary +
 			"\n</conversation_summary>\n\nThe above summarizes our previous conversation. Continue from this context.",
-	}})
+	})
+	r.summaryIndex = len(r.messages) - 1
 	r.postCompactTokens = r.contextTokensLocked()
 	r.mu.Unlock()
 	return CompactResult{Summary: summary, UserSummary: extractCompactUserSummary(summary)}, nil
+}
+
+// compactTodoSuffix renders the outstanding task list into the summarization
+// instruction. It returns "" when no task list is attached or every entry is
+// already complete, so plain chats are not padded with an empty section.
+func (r *Runtime) compactTodoSuffix() string {
+	if r.todoReader == nil {
+		return ""
+	}
+	items := ParseTodos(r.todoReader.Load())
+	if len(items) == 0 {
+		return ""
+	}
+	if progress := SummarizeTodos(items); !progress.Outstanding() {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n## Current Todo List\n\n")
+	for _, item := range items {
+		fmt.Fprintf(&b, "- [%s] %s\n", NormalizeTodoStatus(item.Status), item.Content)
+	}
+	return b.String() + compactPromptSuffix
 }
 
 func extractCompactUserSummary(summary string) string {
@@ -466,6 +692,8 @@ func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error
 	emit(Event{Type: EventRunStarted})
 	r.hooks.OnRunStart(ctx)
 
+	chain := &todoChain{reader: r.todoReader, gated: r.todoChainGated()}
+
 	for turn := 1; turn <= r.maxTurns; turn++ {
 		emit(Event{Type: EventTurnStarted, Turn: turn})
 
@@ -473,14 +701,7 @@ func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error
 		// window, so the provider never receives an oversized prompt.
 		r.maybeAutoCompact(ctx, turn, emit)
 
-		systemPrompt, history := r.promptState()
-		resp, err := r.provider.CompleteStream(ctx, Request{
-			SystemPrompt: systemPrompt,
-			Messages:     history,
-			Tools:        r.tools.Specs(),
-		}, func(delta string) {
-			emit(Event{Type: EventAssistantDelta, Turn: turn, Delta: delta})
-		})
+		resp, err := r.completeTurn(ctx, turn, emit)
 		if err != nil {
 			emit(Event{Type: EventRunFailed, Turn: turn, Error: err})
 			return err
@@ -504,6 +725,26 @@ func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error
 		}
 
 		if len(resp.ToolCalls) == 0 {
+			// The model is done talking. If the task list still has work, the
+			// run continues with the next item instead of ending here.
+			if blocked, reason, needs := r.todoBlocked(); blocked {
+				chain.blocked = true
+				emit(Event{Type: EventTodoBlocked, Turn: turn, BlockedReason: reason, BlockedNeeds: needs})
+			}
+			chain.gated = r.todoChainGated()
+			if step := chain.next(); step.Continue {
+				emit(Event{
+					Type:  EventTodoContinuation,
+					Turn:  turn,
+					Todos: RenderTodos(step.Progress.Items),
+					Plan:  step.Instruction,
+				})
+				r.appendMessage(Message{Role: RoleUser, Content: step.Instruction})
+				continue
+			} else if step.Reason != "" {
+				emit(Event{Type: EventTodoChainStopped, Turn: turn, Error: errors.New(step.Reason),
+					Todos: RenderTodos(step.Progress.Items)})
+			}
 			emit(Event{Type: EventRunFinished, Turn: turn})
 			return nil
 		}
@@ -527,6 +768,103 @@ func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error
 	emit(Event{Type: EventBudgetExhausted, Turn: r.maxTurns, Error: err})
 	emit(Event{Type: EventRunFailed, Turn: r.maxTurns, Error: err})
 	return err
+}
+
+// noteBlocker records a blocker declared through todo_blocked. Keying off the
+// tool result metadata keeps the runtime decoupled from the concrete tool, like
+// the todo and plan signals.
+func (r *Runtime) noteBlocker(result *ToolResult) {
+	if result == nil || result.Metadata == nil {
+		return
+	}
+	blocked, _ := result.Metadata["blocked"].(bool)
+	if !blocked {
+		return
+	}
+	reason, _ := result.Metadata["reason"].(string)
+	needs, _ := result.Metadata["needs"].(string)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blockedReason = strings.TrimSpace(reason)
+	r.blockedNeeds = strings.TrimSpace(needs)
+}
+
+// todoBlocked reports the blocker the agent declared in this run, if any.
+func (r *Runtime) todoBlocked() (bool, string, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blockedReason == "" {
+		return false, "", ""
+	}
+	return true, r.blockedReason, r.blockedNeeds
+}
+
+// todoChainGated reports whether a hook suppresses automatic continuation. The
+// gate is re-checked every turn, because plan mode can be toggled mid-run.
+func (r *Runtime) todoChainGated() bool {
+	for _, hook := range r.hooks {
+		if gate, ok := hook.(TodoChainGate); ok && gate.BlocksTodoContinuation() {
+			return true
+		}
+	}
+	return false
+}
+
+// completeTurn performs one provider request, retrying the turn when the
+// provider fails. A failed request records nothing, so a retry replays the same
+// prompt with the same transcript: no tool is executed twice.
+func (r *Runtime) completeTurn(ctx context.Context, turn int, emit func(Event)) (AssistantResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt <= r.runRetries; attempt++ {
+		if attempt > 0 {
+			if err := r.retrySleep(ctx, runRetryBackoff(attempt)); err != nil {
+				return AssistantResponse{}, lastErr
+			}
+			emit(Event{Type: EventRunRetry, Turn: turn, Attempt: attempt, Error: lastErr})
+		}
+		systemPrompt, history := r.promptState()
+		// A completed response from a previous attempt is discarded, so the
+		// deltas already streamed to the UI are superseded by the retry.
+		resp, err := r.provider.CompleteStream(ctx, Request{
+			SystemPrompt: systemPrompt,
+			Messages:     history,
+			Tools:        r.tools.Specs(),
+		}, func(delta string) {
+			emit(Event{Type: EventAssistantDelta, Turn: turn, Delta: delta})
+		})
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return AssistantResponse{}, err
+		}
+	}
+	return AssistantResponse{}, lastErr
+}
+
+// runRetryBackoff returns the wait before retry attempt n (1-based).
+func runRetryBackoff(attempt int) time.Duration {
+	backoff := time.Second
+	for i := 1; i < attempt; i++ {
+		backoff *= 2
+		if backoff >= 8*time.Second {
+			return 8 * time.Second
+		}
+	}
+	return backoff
+}
+
+// sleepContext waits for d or until ctx is cancelled.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // maybeAutoCompact summarizes the conversation when the context approaches the
@@ -755,6 +1093,7 @@ func (r *Runtime) recordToolResult(result *ToolResult) {
 	if result == nil {
 		return
 	}
+	r.noteBlocker(result)
 	r.appendMessage(Message{
 		Role:       RoleTool,
 		ToolCallID: result.ToolCallID,
