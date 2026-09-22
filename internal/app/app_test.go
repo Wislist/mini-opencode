@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/wislist/mini-opencode/internal/agent"
+	"github.com/wislist/mini-opencode/internal/config"
+	"github.com/wislist/mini-opencode/internal/session"
 )
 
 func TestRunVersionThenQuit(t *testing.T) {
@@ -21,9 +23,33 @@ func TestRunVersionThenQuit(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
+	// Assert against the live version rather than a literal: the Makefile
+	// injects a git-derived string, so a hardcoded value would fail depending
+	// on whether the tree is tagged or dirty.
 	got := out.String()
-	if !strings.Contains(got, "mini-opencode 0.3.0") {
-		t.Fatalf("output missing version: %q", got)
+	if !strings.Contains(got, "mini-opencode "+version) {
+		t.Fatalf("output missing version %q: %q", version, got)
+	}
+}
+
+// TestSetVersionIgnoresEmpty documents that the linker-injected value is only
+// applied when it carries something, so a plain `go build` keeps the fallback
+// constant instead of reporting an empty version.
+func TestSetVersionIgnoresEmpty(t *testing.T) {
+	original := version
+	t.Cleanup(func() { version = original })
+
+	SetVersion("")
+	if version != original {
+		t.Fatalf("empty version replaced the fallback: %q", version)
+	}
+	SetVersion("   ")
+	if version != original {
+		t.Fatalf("blank version replaced the fallback: %q", version)
+	}
+	SetVersion("9.9.9")
+	if version != "9.9.9" {
+		t.Fatalf("version not overridden: %q", version)
 	}
 }
 
@@ -135,5 +161,38 @@ func TestToolDiffPreviewShowsEditAndWriteChanges(t *testing.T) {
 
 	if preview := toolDiffPreview(agent.ToolCall{Name: "read"}, dir); preview != "" {
 		t.Fatalf("read preview = %q, want empty", preview)
+	}
+}
+
+// The todo chain depends on the session store satisfying agent.TodoReader; a
+// silent type-assertion failure would disable the whole feature.
+func TestTodoReaderForWiresSessionStore(t *testing.T) {
+	dir := t.TempDir()
+	store := session.NewStore(dir)
+	sess := store.Create("chain")
+	sess.Todos = `[{"content":"task","status":"pending"}]`
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	todos := newSessionTodoStore(store, func() string { return sess.ID })
+
+	enabled := config.Default()
+	reader := todoReaderFor(enabled, todos)
+	if reader == nil {
+		t.Fatal("todoReaderFor() = nil, want a live reader")
+	}
+	if got := reader.Load(); !strings.Contains(got, "task") {
+		t.Fatalf("reader.Load() = %q, want the stored list", got)
+	}
+
+	// agent.todo_chain: false turns the chain off.
+	off := false
+	disabled := config.Default()
+	disabled.Agent.TodoChain = &off
+	if reader := todoReaderFor(disabled, todos); reader != nil {
+		t.Fatal("todoReaderFor() returned a reader while the chain is disabled")
+	}
+	if reader := todoReaderFor(enabled, nil); reader != nil {
+		t.Fatal("todoReaderFor() returned a reader without a store")
 	}
 }

@@ -16,11 +16,24 @@ import (
 	"github.com/wislist/mini-opencode/internal/agent/tools"
 	"github.com/wislist/mini-opencode/internal/config"
 	"github.com/wislist/mini-opencode/internal/mcp"
+	"github.com/wislist/mini-opencode/internal/memory"
 	"github.com/wislist/mini-opencode/internal/session"
 	"github.com/wislist/mini-opencode/internal/skills"
 )
 
-const version = "0.3.0"
+// version is the fallback build version. A plain `go build` reports this, so the
+// tree always has a meaningful version even without the Makefile. `make build`
+// overrides it with a git-derived value (see the Makefile), which is why the
+// binary — not the source — carries the commit-specific version.
+var version = "0.4.0"
+
+// SetVersion overrides the reported version. The main package calls it from
+// linker-injected values; tests may call it directly.
+func SetVersion(v string) {
+	if strings.TrimSpace(v) != "" {
+		version = v
+	}
+}
 
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
@@ -42,7 +55,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	currentSession := sessions.Create("new session")
 	observer := newSessionFileObserver(sessions, func() string { return currentSession.ID })
 	todos := newSessionTodoStore(sessions, func() string { return currentSession.ID })
-	planHook := &agent.PlanModeHook{}
+	planHook := agent.NewPlanModeHook(false)
 	planApprover := cliPlanApprover(scanner, out, planHook)
 	sessionAllowed := map[string]bool{}
 
@@ -60,6 +73,8 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		planHook:     planHook,
 		planApprover: planApprover,
 		allowedTools: sessionAllowed,
+		todoReader:   todoReaderFor(cfg, todos),
+		memories:     memory.NewStore(workingDir),
 	}
 	if subProvider, perr := newSubagentProvider(cfg, workingDir); perr == nil {
 		extras.subagent = newSubagentRunner(subProvider, workingDir, cfg)
@@ -88,6 +103,13 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		if input == "" {
 			continue
 		}
+		// /memory takes an optional search query, so it is matched by prefix
+		// before the exact-match switch below.
+		if input == "/memory" || strings.HasPrefix(input, "/memory ") {
+			printMemories(out, workingDir, strings.TrimSpace(strings.TrimPrefix(input, "/memory")))
+			fmt.Fprint(out, "\n> ")
+			continue
+		}
 
 		switch input {
 		case "/help":
@@ -108,7 +130,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 				cfg:        cfg,
 				runtime:    runtime,
 				session:    currentSession,
-				planMode:   planHook.Active,
+				planMode:   planHook.IsActive(),
 				allowed:    sessionAllowed,
 			})
 		case "/mcp":
@@ -139,6 +161,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			}
 			currentSession = fork
 			runtime.SetMessages(fork.Messages)
+			runtime.SetContextTokens(0)
 			runtime.SetUsage(agent.Usage{
 				PromptTokens:     int(fork.PromptTokens),
 				CompletionTokens: int(fork.CompletionTokens),
@@ -146,8 +169,8 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			})
 			fmt.Fprintf(out, "[branched from %s into %s]\n", fork.ParentSessionID, fork.Title)
 		case "/plan":
-			planHook.Active = !planHook.Active
-			if planHook.Active {
+			planHook.SetActive(!planHook.IsActive())
+			if planHook.IsActive() {
 				fmt.Fprintln(out, "[plan mode on] read-only analysis; the agent will submit a plan for approval")
 			} else {
 				fmt.Fprintln(out, "[plan mode off] full tool access restored")
@@ -167,6 +190,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			_ = saveSession(sessions, currentSession, runtime)
 			currentSession = sessions.Create("new session")
 			runtime.SetMessages(nil)
+			runtime.SetContextTokens(0)
 			fmt.Fprintln(out, "[new session started]")
 		case "/archive":
 			if err := saveSession(sessions, currentSession, runtime); err != nil {
@@ -181,6 +205,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			fmt.Fprintf(out, "[archived session: %s]\n%s\n", currentSession.Title, path)
 			currentSession = sessions.Create("new session")
 			runtime.SetMessages(nil)
+			runtime.SetContextTokens(0)
 			fmt.Fprintln(out, "[new session started]")
 		case "/session", "/sessions":
 			metas, err := sessions.List()
@@ -215,6 +240,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			_ = saveSession(sessions, currentSession, runtime)
 			currentSession = sess
 			runtime.SetMessages(sess.Messages)
+			runtime.SetContextTokens(0)
 			runtime.SetUsage(agent.Usage{
 				PromptTokens:     int(sess.PromptTokens),
 				CompletionTokens: int(sess.CompletionTokens),
@@ -289,7 +315,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 				continue
 			}
 			runInput := input
-			if planHook.Active {
+			if planHook.IsActive() {
 				runInput = "You are in plan mode. Do not modify any files or execute commands. " +
 					"Analyze the request with read-only tools, then call exit_plan_mode with a concrete plan.\n\n" + input
 			}
@@ -336,6 +362,12 @@ func printStatus(out io.Writer, in statusInput) {
 	window := in.cfg.Provider.EffectiveContextWindow()
 	fmt.Fprintf(out, "  context: ~%d tokens of %d (%.0f%%), %d messages\n",
 		tokens, window, contextPercent(tokens, window), len(in.runtime.Messages()))
+	// The system prompt is a large fixed floor, so it is shown separately:
+	// otherwise clearing the session leaves the total almost unchanged and
+	// looks like the reset failed.
+	details := in.runtime.ContextDetails()
+	fmt.Fprintf(out, "           %d system prompt + tools, %d conversation\n",
+		details.SystemTokens, details.ConversationTokens)
 	usage := in.runtime.Usage()
 	if usage.IsZero() {
 		fmt.Fprintln(out, "  tokens: provider reports no usage")
@@ -433,7 +465,8 @@ func saveSession(store *session.Store, sess *session.Session, rt *agent.Runtime)
 	sess.CompletionTokens = int64(usage.CompletionTokens)
 	if sess.Title == "new session" {
 		for _, msg := range msgs {
-			if msg.Role == agent.RoleUser && !strings.Contains(msg.Content, "<conversation_summary>") {
+			if msg.Role == agent.RoleUser && !strings.Contains(msg.Content, "<conversation_summary>") &&
+				!agent.IsTodoContinuationText(msg.Content) {
 				sess.Title = session.TitleFromMessage(msg.Content)
 				break
 			}
@@ -505,6 +538,63 @@ type runtimeExtras struct {
 	allowedTools map[string]bool
 	// subagent runs delegated read-only investigations for the task tool.
 	subagent tools.TaskRunner
+	// todoReader lets the run loop drive the session task list.
+	todoReader agent.TodoReader
+	// memories is the cross-session note store. Nil disables both the memory
+	// tool and recall injection.
+	memories *memory.Store
+	// memoryQuery seeds the recall injected into the system prompt: recalled
+	// notes are scored against it, so it should describe what is being worked
+	// on. Empty falls back to the most recently updated notes.
+	memoryQuery string
+}
+
+// memoryRecallLimit bounds how many remembered notes are injected into a system
+// prompt. Recall competes with the task itself for context, so it stays small:
+// a handful of the most relevant notes is enough to orient the agent.
+const memoryRecallLimit = 3
+
+// printMemories lists stored memory notes, or searches them when a query is
+// given. Memory is plain Markdown on disk, so this is a window onto files the
+// user can also edit directly.
+func printMemories(out io.Writer, workingDir, query string) {
+	store := memory.NewStore(workingDir)
+	fmt.Fprintf(out, "memory dir: %s\n", store.Dir())
+
+	notes, err := store.Search(query, 20)
+	if err != nil {
+		fmt.Fprintf(out, "memory unavailable: %v\n", err)
+		return
+	}
+	if len(notes) == 0 {
+		if strings.TrimSpace(query) == "" {
+			fmt.Fprintln(out, "no memories stored yet")
+			// The directory only exists once something is written, so point at
+			// it explicitly: memory is plain Markdown the user can author too.
+			fmt.Fprintln(out, "notes are plain Markdown; write one with the memory tool or create the file by hand.")
+		} else {
+			fmt.Fprintf(out, "no memories matched %q\n", query)
+		}
+		return
+	}
+	for _, note := range notes {
+		fmt.Fprintf(out, "\n## %s  (%s)\n", note.Title, note.Name)
+		if len(note.Tags) > 0 {
+			fmt.Fprintf(out, "tags: %s\n", strings.Join(note.Tags, ", "))
+		}
+		fmt.Fprintf(out, "updated: %s\n", note.UpdatedAt.Local().Format("2006-01-02 15:04"))
+		fmt.Fprintln(out, indent(note.Body, "  "))
+	}
+	fmt.Fprintf(out, "\n(%d note(s))\n", len(notes))
+}
+
+// runRetries resolves the configured run-level retry count.
+func runRetries(cfg config.Config) int {
+	retries, set := cfg.Agent.Retries()
+	if !set {
+		return agent.DefaultRunRetries
+	}
+	return retries
 }
 
 // subagentRunnerFor returns the runner for the task tool, or nil when unset.
@@ -528,6 +618,13 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 	if err != nil {
 		return nil, err
 	}
+	// Recall happens before the prompt is used: notes relevant to what is
+	// being worked on are appended to the system prompt so the agent starts
+	// with what earlier sessions learned. The section is omitted entirely when
+	// nothing is remembered, so a fresh workspace pays nothing for this.
+	if recall := tools.MemoryRecallSection(extras.memories, extras.memoryQuery, memoryRecallLimit); recall != "" {
+		systemPrompt = systemPrompt + "\n\n" + recall
+	}
 
 	provider, err := newProvider(cfg.Provider, workingDir)
 	if err != nil {
@@ -545,6 +642,8 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 		agent.WithContextWindow(cfg.Provider.EffectiveContextWindow()),
 		agent.WithCompactionPrompt(summaryPrompt),
 		agent.WithCompactionThreshold(cfg.Agent.CompactThreshold),
+		agent.WithRunRetries(runRetries(cfg)),
+		agent.WithTodoReader(extras.todoReader),
 		agent.WithPermissionPolicy(agent.NewDefaultPermissionPolicyWithRoots(workingDir, cfg.Workspace.AllowedRoots)),
 		agent.WithPermissionConfirmer(confirmTool(scanner, out, extras.allowedTools, workingDir)),
 		agent.WithHook(agent.NewSafetyHook(workingDir)),
@@ -567,6 +666,9 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 	for _, tool := range tools.CodingTools(codingOptions) {
 		options = append(options, agent.WithTool(tool))
 	}
+	if memTool := tools.NewMemoryTool(tools.MemoryOptions{Store: extras.memories}); memTool != nil {
+		options = append(options, agent.WithTool(memTool))
+	}
 	for _, tool := range extras.mcpTools {
 		options = append(options, agent.WithTool(tool))
 	}
@@ -575,6 +677,19 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 		provider,
 		options...,
 	), nil
+}
+
+// todoReaderFor exposes the session todo store to the run loop, honouring the
+// agent.todo_chain switch.
+func todoReaderFor(cfg config.Config, store tools.TodoStore) agent.TodoReader {
+	if store == nil || !cfg.Agent.TodoChainEnabled() {
+		return nil
+	}
+	reader, ok := store.(agent.TodoReader)
+	if !ok {
+		return nil
+	}
+	return reader
 }
 
 // mcpServerConfigs converts the persisted MCP settings into launch configs.
@@ -719,7 +834,7 @@ func cliPlanApprover(scanner *bufio.Scanner, out io.Writer, hook *agent.PlanMode
 		answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
 		if answer == "y" || answer == "yes" || answer == "允许" {
 			if hook != nil {
-				hook.Active = false
+				hook.SetActive(false)
 			}
 			return true, ""
 		}
@@ -805,6 +920,21 @@ func renderEvent(out io.Writer) func(agent.Event) {
 		case agent.EventHookStopped:
 			if event.Error != nil {
 				fmt.Fprintf(out, "hook stopped run: %v\n", event.Error)
+			}
+		case agent.EventTodoContinuation:
+			fmt.Fprintf(out, "[continuing with the next task]\n%s\n", event.Todos)
+		case agent.EventTodoBlocked:
+			fmt.Fprintf(out, "[todo chain paused] %s\n", event.BlockedReason)
+			if strings.TrimSpace(event.BlockedNeeds) != "" {
+				fmt.Fprintf(out, "[needs] %s\n", event.BlockedNeeds)
+			}
+		case agent.EventTodoChainStopped:
+			if event.Error != nil {
+				fmt.Fprintf(out, "warning: todo chain stopped: %v\n", event.Error)
+			}
+		case agent.EventRunRetry:
+			if event.Error != nil {
+				fmt.Fprintf(out, "[retry %d] %v\n", event.Attempt, event.Error)
 			}
 		case agent.EventProviderWarning:
 			if event.Error != nil {

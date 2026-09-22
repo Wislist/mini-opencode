@@ -14,6 +14,7 @@ import (
 	"github.com/wislist/mini-opencode/internal/agent/tools"
 	"github.com/wislist/mini-opencode/internal/config"
 	"github.com/wislist/mini-opencode/internal/mcp"
+	"github.com/wislist/mini-opencode/internal/memory"
 	"github.com/wislist/mini-opencode/internal/session"
 	"github.com/wislist/mini-opencode/internal/skills"
 	"github.com/wislist/mini-opencode/internal/tui"
@@ -53,7 +54,7 @@ func RunTUI(ctx context.Context) error {
 		return lines
 	})
 
-	planHook := &agent.PlanModeHook{Active: false}
+	planHook := agent.NewPlanModeHook(false)
 	model.SetPlanHook(planHook)
 
 	sessionStore := session.NewStore(workingDir)
@@ -109,26 +110,33 @@ func RunTUI(ctx context.Context) error {
 		return err
 	}
 	model.SetRuntime(rt)
+	// One store serves both the tool and the /memory command, so a note the
+	// agent writes is immediately visible to the user.
+	memoryStore := memory.NewStore(workingDir)
+	model.SetMemoryStore(memoryStore)
+	if provider, perr := newProvider(cfg.Provider, workingDir); perr == nil {
+		model.SetMemoryDistiller(newDistiller(provider, memoryStore))
+	}
 	for _, status := range mcpManager.Statuses() {
 		if status.Enabled && status.Err != "" {
 			model.AddSystemNotice(fmt.Sprintf("mcp server %q failed: %s", status.Name, status.Err))
 		}
 	}
 
-	// Keep the UI in the alternate screen, but do not enable Bubble Tea mouse
-	// tracking. Mouse tracking makes many terminals send drag events to the app
-	// instead of selecting text, which prevents users from copying generated
-	// output.
+	// Mouse wheel handling. Enable Bubble Tea mouse tracking so wheel notches
+	// arrive as exact events (Model.handleMouse) instead of dependent on how
+	// each terminal translates them. Cell motion rather than all motion keeps
+	// drag reporting quiet so text selection still works with the terminal's
+	// selection modifier (Option on macOS terminals).
 	//
-	// Enabling xterm alternate-scroll mode asks supported terminals to translate
-	// the mouse wheel into cursor-key events while the alternate screen is active.
-	// That keeps wheel scrolling inside the TUI viewport instead of exposing the
-	// terminal scrollback from previous sessions, without stealing drag selection.
+	// xterm alternate-scroll mode stays enabled as a fallback: on terminals
+	// that suppress wheel events while a selection modifier is held, the wheel
+	// still arrives as cursor up/down keys, which scroll through handleKey.
 	output := tui.NewNativeCursorWriter(os.Stdout, model.NativeCursorPosition)
 	fmt.Fprint(output, enableAlternateScrollMode)
 	defer fmt.Fprint(output, disableAlternateScrollMode)
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithOutput(output))
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(output))
 	model.SetProgram(p)
 
 	_, err = p.Run()
@@ -145,6 +153,12 @@ func tuiRuntimeExtras(cfg config.Config, workingDir string, mcpTools []agent.Too
 		todos:        todos,
 		planHook:     planHook,
 		planApprover: model.MakePlanApprover(),
+		todoReader:   todoReaderFor(cfg, todos),
+		memories:     memory.NewStore(workingDir),
+		// Recall is scored against the session's opening request, so a resumed
+		// conversation recalls notes relevant to the work in hand rather than
+		// whatever was written most recently.
+		memoryQuery: model.MemoryQuery(),
 	}
 	if subProvider, err := newSubagentProvider(cfg, workingDir); err == nil {
 		extras.subagent = newSubagentRunner(subProvider, workingDir, cfg)
@@ -187,6 +201,8 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 		agent.WithContextWindow(cfg.Provider.EffectiveContextWindow()),
 		agent.WithCompactionPrompt(summaryPrompt),
 		agent.WithCompactionThreshold(cfg.Agent.CompactThreshold),
+		agent.WithRunRetries(runRetries(cfg)),
+		agent.WithTodoReader(extras.todoReader),
 		agent.WithPermissionPolicy(agent.NewDefaultPermissionPolicyWithRoots(workingDir, cfg.Workspace.AllowedRoots)),
 		agent.WithPermissionConfirmer(model.MakeConfirmer()),
 		// The danger guard and loop guard must be registered on the TUI path
