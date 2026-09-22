@@ -68,6 +68,8 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		return m.handleName(input)
 	case input == "/compact":
 		return m.startCompact()
+	case input == "/memory", strings.HasPrefix(input, "/memory "):
+		return m.handleMemory(input)
 	case input == "/archive":
 		return m.handleArchiveSession()
 	case input == "/newsession":
@@ -114,6 +116,29 @@ func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
 	}()
 
 	return m, spinner.Tick
+}
+
+// startDistill extracts durable memories from the conversation that just
+// finished. It runs in the background after the run is over: extraction is a
+// second provider call, and making the user wait for it would be a visible
+// regression for a feature whose whole point is to stay unobtrusive.
+func (m *Model) startDistill() tea.Cmd {
+	if m.memoryDistiller == nil || m.runtime == nil {
+		return nil
+	}
+	messages := distillMessagesFor(m.runtime.Messages())
+	if len(messages) == 0 {
+		return nil
+	}
+	distiller := m.memoryDistiller
+	return func() tea.Msg {
+		// Detached from the run context so cancelling the run does not cancel
+		// the extraction its transcript earned.
+		ctx, cancel := context.WithTimeout(context.Background(), distillTimeout)
+		defer cancel()
+		result, err := distiller.Extract(ctx, messages)
+		return memoryDistilledMsg{notes: len(result.Notes), err: err}
+	}
 }
 
 func (m *Model) saveKey(key string) (tea.Model, tea.Cmd) {
@@ -292,33 +317,39 @@ func (m *Model) startCompact() (tea.Model, tea.Cmd) {
 	return m, spinner.Tick
 }
 
-func (m *Model) handleRuntimeEvent(event agent.Event) {
+// handleRuntimeEvent applies one runtime event to the model. It returns a
+// command when the event scheduled deferred work, such as the throttled repaint
+// of a streaming response; the caller must run it or the timer never fires and
+// the streamed text never appears.
+func (m *Model) handleRuntimeEvent(event agent.Event) tea.Cmd {
 	switch event.Type {
 	case agent.EventRunStarted:
 		m.saveCurrentSession()
 	case agent.EventAssistantDelta:
 		if event.Delta == "" {
-			return
+			return nil
 		}
+		// Accumulating the delta is cheap; rendering it is not. Appending here
+		// and rendering on a timer keeps a fast token stream from re-running
+		// the Markdown renderer (and re-laying out the transcript) once per
+		// token, which is what made long responses stutter and starve the
+		// spinner.
 		m.streamingText += event.Delta
 		m.queueSessionFlush([]agent.Message{{Role: agent.RoleAssistant, Content: m.streamingText}})
-		rendered := m.renderAssistantMessage(m.streamingText)
-		if m.streamingIdx < 0 {
-			m.addBlock(rendered)
-			m.streamingIdx = len(m.blocks) - 1
-		} else {
-			m.blocks[m.streamingIdx] = rendered
-		}
-		m.refreshViewport()
-		return
+		return m.scheduleStreamRender()
 	case agent.EventAssistantResponse:
 		wasStreaming := m.streamingIdx >= 0
+		// Any throttled frame still queued is now stale: the authoritative
+		// content below supersedes it, and letting the timer fire afterwards
+		// would repaint the block with a partial render.
+		m.cancelStreamRender()
 		if event.Message != nil && event.Message.Content != "" {
 			// If we were streaming, replace the in-progress block with the
 			// authoritative final content. Otherwise (tool-only response with
 			// no content deltas) add a fresh block.
 			if wasStreaming {
 				m.blocks[m.streamingIdx] = m.renderAssistantMessage(event.Message.Content)
+				m.markBlocksChanged()
 			} else {
 				m.addBlock(m.renderAssistantMessage(event.Message.Content))
 			}
@@ -352,6 +383,27 @@ func (m *Model) handleRuntimeEvent(event agent.Event) {
 		if event.Error != nil && event.Error.Error() != "" {
 			m.addBlock(toolError.Width(errWidth).Render("✗ " + event.Error.Error()))
 		}
+	case agent.EventTodoContinuation:
+		// The event carries the rendered list, so the panel and the notice stay
+		// in step without re-reading the store.
+		m.todos = event.Todos
+		m.addBlock(toolArrow.Render("→ continuing with the next task"))
+		m.addBlock(dimStyle.Render(indentLines(event.Todos, "  ")))
+	case agent.EventTodoBlocked:
+		reason := strings.TrimSpace(event.BlockedReason)
+		m.addBlock(permAsk.Render("⏸ paused: " + reason))
+		if needs := strings.TrimSpace(event.BlockedNeeds); needs != "" {
+			m.addBlock(dimStyle.Render("needs: " + needs))
+		}
+	case agent.EventTodoChainStopped:
+		if event.Error != nil {
+			m.addBlock(errorStyle.Render("! todo chain stopped: " + event.Error.Error()))
+		}
+	case agent.EventRunRetry:
+		if event.Error != nil {
+			m.addBlock(dimStyle.Render(fmt.Sprintf("⟳ retrying the turn (attempt %d): %v",
+				event.Attempt, event.Error)))
+		}
 	case agent.EventProviderWarning:
 		if event.Error != nil {
 			m.addBlock(toolError.Width(max(1, m.width-2)).Render("! provider: " + event.Error.Error()))
@@ -359,7 +411,7 @@ func (m *Model) handleRuntimeEvent(event agent.Event) {
 	case agent.EventContextCompacted:
 		if event.Error != nil {
 			m.addBlock(errorStyle.Render("✗ automatic compaction failed: " + event.Error.Error()))
-			return
+			return nil
 		}
 		m.addBlock(toolArrow.Render(fmt.Sprintf(
 			"⟳ context auto-compacted at ~%s tokens; the summary replaced the transcript",
@@ -367,14 +419,15 @@ func (m *Model) handleRuntimeEvent(event agent.Event) {
 		if strings.TrimSpace(event.Plan) != "" {
 			m.addBlock(m.renderAssistantMessage(event.Plan))
 		}
-		return
+		return nil
 	case agent.EventUsage:
 		// Token accounting updates the status line, which is rebuilt from the
 		// runtime totals on every render, so nothing to append here.
-		return
+		return nil
 	}
 	if event.Type == agent.EventToolCallFailed || event.Type == agent.EventToolPermissionDenied || event.Type == agent.EventHookDenied || event.Type == agent.EventHookStopped || event.Type == agent.EventRunFailed || event.Type == agent.EventRunFinished {
 		m.saveCurrentSession()
 	}
 	m.refreshViewport()
+	return nil
 }

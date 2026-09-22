@@ -79,8 +79,10 @@ func (m *Model) handleNewSession() (tea.Model, tea.Cmd) {
 	m.currentSession = m.sessions.Create("new session")
 	if m.runtime != nil {
 		m.runtime.SetMessages(nil)
+		m.runtime.SetContextTokens(0)
 	}
 	m.blocks = nil
+	m.markBlocksChanged()
 	m.streamingIdx = -1
 	m.streamingText = ""
 	m.todos = ""
@@ -152,8 +154,10 @@ func (m *Model) handleArchiveSession() (tea.Model, tea.Cmd) {
 	m.currentSession = m.sessions.Create("new session")
 	if m.runtime != nil {
 		m.runtime.SetMessages(nil)
+		m.runtime.SetContextTokens(0)
 	}
 	m.blocks = nil
+	m.markBlocksChanged()
 	m.streamingIdx = -1
 	m.streamingText = ""
 	m.todos = ""
@@ -183,6 +187,7 @@ func (m *Model) handleForkSession() (tea.Model, tea.Cmd) {
 	m.currentSession = fork
 	if m.runtime != nil {
 		m.runtime.SetMessages(fork.Messages)
+		m.runtime.SetContextTokens(0)
 		m.runtime.SetUsage(agent.Usage{
 			PromptTokens:     int(fork.PromptTokens),
 			CompletionTokens: int(fork.CompletionTokens),
@@ -191,6 +196,7 @@ func (m *Model) handleForkSession() (tea.Model, tea.Cmd) {
 	}
 	m.todos = m.todosForSession(fork.ID)
 	m.blocks = nil
+	m.markBlocksChanged()
 	m.streamingIdx = -1
 	m.streamingText = ""
 	m.addBlock(toolArrow.Render("branched into " + fork.Title))
@@ -218,7 +224,7 @@ func (m *Model) saveCurrentSessionErr() error {
 	m.currentSession.CompletionTokens = int64(usage.CompletionTokens)
 	if m.currentSession.Title == "new session" {
 		for _, msg := range msgs {
-			if msg.Role == agent.RoleUser && !isCompactSummaryMessage(msg) {
+			if msg.Role == agent.RoleUser && !isCompactSummaryMessage(msg) && !agent.IsTodoContinuationText(msg.Content) {
 				m.currentSession.Title = session.TitleFromMessage(msg.Content)
 				break
 			}
@@ -278,7 +284,7 @@ func (m *Model) sessionSnapshot(extra []agent.Message) *session.Session {
 	snap.Messages = msgs
 	if snap.Title == "new session" {
 		for _, msg := range msgs {
-			if msg.Role == agent.RoleUser && !isCompactSummaryMessage(msg) {
+			if msg.Role == agent.RoleUser && !isCompactSummaryMessage(msg) && !agent.IsTodoContinuationText(msg.Content) {
 				snap.Title = session.TitleFromMessage(msg.Content)
 				break
 			}
@@ -295,6 +301,12 @@ func (m *Model) renderHistoryIntoBlocks(messages []agent.Message) {
 		case agent.RoleUser:
 			if isCompactSummaryMessage(msg) {
 				m.addBlock(toolArrow.Render("⟳ previous context compacted"))
+				continue
+			}
+			if agent.IsTodoContinuationText(msg.Content) {
+				// The task-list chain injects these turns itself; showing them
+				// as user messages would put words in the user's mouth.
+				m.addBlock(toolArrow.Render("→ continued with the next task"))
 				continue
 			}
 			m.addBlock(m.renderUserMessage(msg.Content))

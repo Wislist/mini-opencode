@@ -148,7 +148,7 @@ func TestPlanPromptRendersAndCapsLongPlans(t *testing.T) {
 
 func TestPlanApprovalTurnsOffPlanMode(t *testing.T) {
 	m := newTestModel(t)
-	hook := &agent.PlanModeHook{Active: true}
+	hook := agent.NewPlanModeHook(true)
 	m.SetPlanHook(hook)
 	m.mode = ModePlan
 
@@ -160,7 +160,7 @@ func TestPlanApprovalTurnsOffPlanMode(t *testing.T) {
 	if decision := <-resp; !decision.approved {
 		t.Fatalf("decision = %+v", decision)
 	}
-	if hook.Active {
+	if hook.IsActive() {
 		t.Fatal("plan mode stayed active after approval")
 	}
 	if m.mode != ModeCode {
@@ -168,12 +168,46 @@ func TestPlanApprovalTurnsOffPlanMode(t *testing.T) {
 	}
 
 	// Rejection keeps plan mode on.
-	hook.Active = true
+	hook.SetActive(true)
 	m.mode = ModePlan
 	m.state = statePlanApproval
 	m.pendingPlan = &planApprovalMsg{plan: "another", resp: make(chan planDecision, 1)}
 	m.handlePlanApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	if !hook.Active || m.mode != ModePlan {
+	if !hook.IsActive() || m.mode != ModePlan {
 		t.Fatal("rejection must leave plan mode enabled")
+	}
+}
+
+// The todo chain injects its own user turns; reloading a session must not show
+// those as if the user had typed them.
+func TestHistoryRendersTodoContinuationAsNotice(t *testing.T) {
+	m := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m.renderHistoryIntoBlocks([]agent.Message{
+		{Role: agent.RoleUser, Content: "do the list"},
+		{Role: agent.RoleUser, Content: "[todo continuation 1/3] Outstanding task list:\n\n[ ] b\n\nContinue with: b"},
+		{Role: agent.RoleAssistant, Content: "working"},
+	})
+
+	joined := strings.Join(m.blocks, "\n")
+	if !strings.Contains(joined, "continued with the next task") {
+		t.Fatalf("continuation turn was not summarized: %q", joined)
+	}
+	if strings.Contains(joined, "Outstanding task list") {
+		t.Fatalf("raw continuation text leaked into the transcript: %q", joined)
+	}
+	if !strings.Contains(joined, "do the list") {
+		t.Fatalf("the real user turn disappeared: %q", joined)
+	}
+}
+
+// Injected turns must be recognizable, so titles and transcripts can skip them.
+func TestTodoContinuationTextIsRecognizable(t *testing.T) {
+	if !agent.IsTodoContinuationText("[todo continuation 1/3] Outstanding task list:") {
+		t.Fatal("IsTodoContinuationText() = false for an injected continuation")
+	}
+	if agent.IsTodoContinuationText("please do the list") {
+		t.Fatal("IsTodoContinuationText() = true for a real user message")
 	}
 }

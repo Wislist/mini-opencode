@@ -28,6 +28,7 @@ var commandList = []CommandItem{
 	{"/newsession", "start a new conversation"},
 	{"/archive", "archive current conversation to JSON"},
 	{"/compact", "summarize and replace the conversation context"},
+	{"/memory", "list or search cross-session memories"},
 	{"/key", "set the API key for the current provider"},
 	{"/name", "set or show the user and assistant display names"},
 	{"/quit", "exit the application"},

@@ -16,6 +16,7 @@ import (
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/agent/tools"
 	"github.com/wislist/mini-opencode/internal/config"
+	"github.com/wislist/mini-opencode/internal/memory"
 	"github.com/wislist/mini-opencode/internal/session"
 )
 
@@ -113,6 +114,10 @@ type Model struct {
 	workingDir string
 	version    string
 
+	// terminal records how the host terminal delivers wheel input so scroll
+	// steps can be tuned per terminal.
+	terminal terminalProfile
+
 	blocks []string
 	width  int
 	height int
@@ -146,6 +151,23 @@ type Model struct {
 	initPromptProvider func() (string, error)
 	// systemPromptRestore holds the prompt to restore once the /init run ends.
 	systemPromptRestore string
+	// memoryDistiller extracts durable memories after a run completes. Nil
+	// disables automatic extraction.
+	memoryDistiller *memory.Distiller
+	// memoryStore backs the /memory command.
+	memoryStore *memory.Store
+	// streamRenderPending is set while a throttled repaint of the streaming
+	// assistant block is queued; see stream.go for why rendering is throttled.
+	streamRenderPending bool
+	// transcriptDirty marks the cached viewport content as stale. It defaults
+	// to true so the first refresh builds the content, and is set by addBlock
+	// and markBlocksChanged. Refreshing when it is false is a cheap no-op,
+	// which matters because View() runs on every spinner tick.
+	transcriptDirty bool
+	// footerDirty marks the memoized footer sections stale; see renderFooter
+	// in render.go. It defaults to true so the first render builds them.
+	cachedFooter []string
+	footerDirty  bool
 
 	pendingPerm *permissionRequestMsg
 	// sessionAllowed holds tool names the user approved for the whole session
@@ -193,16 +215,23 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 	ki.CharLimit = 0
 
 	return &Model{
-		viewport:     vp,
-		input:        ti,
-		spinner:      sp,
-		keyInput:     ki,
-		state:        stateIdle,
+		viewport: vp,
+		input:    ti,
+		spinner:  sp,
+		keyInput: ki,
+		state:    stateIdle,
+		// The initial viewport content has never been built, so the first
+		// refresh must not be skipped.
+		transcriptDirty: true,
+		// The footer has never been built, so the first render must not take
+		// the cached (nil) path.
+		footerDirty:  true,
 		streamingIdx: -1,
 		cfg:          cfg,
 		workingDir:   workingDir,
 		version:      ver,
 		mode:         ModeCode,
+		terminal:     detectTerminalProfile(),
 	}
 }
 
@@ -225,8 +254,33 @@ func (m *Model) CurrentSessionID() string {
 	return m.currentSession.ID
 }
 
+// MemoryQuery returns the text that cross-session recall is scored against:
+// the first real user message of the active session. It deliberately skips
+// compaction summaries and injected todo continuations, which are runtime
+// bookkeeping rather than the work being done, so recall keys off what the
+// user actually asked for.
+func (m *Model) MemoryQuery() string {
+	if m.currentSession == nil {
+		return ""
+	}
+	for _, msg := range m.currentSession.Messages {
+		if msg.Role != agent.RoleUser {
+			continue
+		}
+		if isCompactSummaryMessage(msg) || agent.IsTodoContinuationText(msg.Content) {
+			continue
+		}
+		if text := strings.TrimSpace(msg.Content); text != "" {
+			return text
+		}
+	}
+	// A brand-new session has no transcript yet; fall back to whatever the
+	// user has typed so far so recall still has something to work with.
+	return strings.TrimSpace(m.input.Value())
+}
+
 // SetPlanHook attaches the agent-side plan mode enforcer. The TUI toggles
-// hook.Active when switching modes.
+// hook when switching modes.
 func (m *Model) SetPlanHook(h *agent.PlanModeHook) { m.planHook = h }
 
 // onPlanSubmitted records the plan decision in the transcript and refreshes
@@ -280,7 +334,7 @@ func (m *Model) toggleMode() {
 		m.mode = ModeCode
 	}
 	if m.planHook != nil {
-		m.planHook.Active = m.mode == ModePlan
+		m.planHook.SetActive(m.mode == ModePlan)
 	}
 	m.refreshViewport()
 }
@@ -299,7 +353,7 @@ func (m *Model) MakePlanApprover() tools.PlanApprover {
 			if decision.approved {
 				m.mode = ModeCode
 				if m.planHook != nil {
-					m.planHook.Active = false
+					m.planHook.SetActive(false)
 				}
 			}
 			return decision.approved, decision.feedback
@@ -370,6 +424,19 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	// Any incoming message may change what the footer shows (state, todos,
+	// input, mode, session list), so the memoized footer is invalidated up
+	// front rather than at every mutation site — a missed invalidation would
+	// show stale UI, which is far worse than rebuilding when unnecessary.
+	// The paths that return early below invalidate for themselves.
+	switch msg.(type) {
+	case spinner.TickMsg, streamRenderMsg:
+		// These change only the spinner glyph and the transcript, neither of
+		// which the footer renders, so the footer cache stays valid.
+	default:
+		m.invalidateFooter()
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Never render into the terminal's final cell. Many terminals wrap as
@@ -395,6 +462,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case streamRenderMsg:
+		m.flushStreamRender()
+
 	case runtimeEventMsg:
 		if msg.event.Type == agent.EventTodosChanged {
 			m.todos = msg.event.Todos
@@ -405,7 +475,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.onPlanSubmitted(msg.event)
 			break
 		}
-		m.handleRuntimeEvent(msg.event)
+		if cmd := m.handleRuntimeEvent(msg.event); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case runtimeDoneMsg:
 		m.state = stateIdle
@@ -422,10 +494,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.maybeGenerateTitle(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// Extract durable memories in the background once the run is over.
+		// This is intentionally after the UI is already idle: extraction must
+		// never delay the answer the user just waited for.
+		if msg.err == nil {
+			if cmd := m.startDistill(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 		m.gitStatus = collectGitStatus(m.workingDir)
 		m.refreshViewport()
 		m.input.Focus()
 		cmds = append(cmds, textinput.Blink)
+
+	case memoryDistilledMsg:
+		// Extraction is a background enhancement, so a failure is reported
+		// quietly rather than as an error the user must act on: the run they
+		// cared about already succeeded.
+		if msg.err != nil {
+			break
+		}
+		if msg.notes > 0 {
+			m.addBlock(toolArrow.Render(fmt.Sprintf("⟳ remembered %d note(s) for future sessions", msg.notes)))
+			m.refreshViewport()
+		}
 
 	case sessionTitleMsg:
 		if msg.err == nil && msg.title != "" && m.currentSession != nil {
@@ -474,6 +566,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentSession = msg.sess
 			if m.runtime != nil {
 				m.runtime.SetMessages(msg.sess.Messages)
+				m.runtime.SetContextTokens(0)
 				m.runtime.SetUsage(agent.Usage{
 					PromptTokens:     int(msg.sess.PromptTokens),
 					CompletionTokens: int(msg.sess.CompletionTokens),
@@ -481,6 +574,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			m.blocks = nil
+			m.markBlocksChanged()
 			m.streamingIdx = -1
 			m.streamingText = ""
 			m.todos = m.todosForSession(msg.sess.ID)
@@ -503,7 +597,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 
 	case tea.KeyMsg:
+		// handleKey returns early, so it invalidates the footer itself.
+		m.invalidateFooter()
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		m.invalidateFooter()
+		return m.handleMouse(msg)
 	}
 
 	var cmd tea.Cmd
@@ -526,9 +626,61 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) addBlock(block string) {
 	m.blocks = append(m.blocks, block)
+	m.transcriptDirty = true
 }
 
+// markBlocksChanged records that a block was edited in place, so the cached
+// transcript is rebuilt on the next refresh. Callers that assign into m.blocks
+// directly must call this.
+func (m *Model) markBlocksChanged() {
+	m.transcriptDirty = true
+}
+
+// viewportTailBlocks bounds how many trailing blocks are handed to the
+// viewport. The transcript is append-only and the viewport can only ever show
+// the last screenful, so joining the entire history on every frame grew
+// linearly with the conversation and showed up as stutter late in a long task.
+// Keeping a generous tail preserves scrollback in practice while making the
+// per-frame cost independent of how long the session has run.
+const viewportTailBlocks = 400
+
+// refreshViewport rebuilds the viewport content and pins it to the bottom.
+//
+// The join is skipped when nothing changed, because View() runs on every
+// message — including every spinner tick — and the transcript usually has not
+// moved between frames.
 func (m *Model) refreshViewport() {
-	m.viewport.SetContent(strings.Join(m.blocks, "\n\n"))
+	if !m.transcriptDirty {
+		m.viewport.GotoBottom()
+		return
+	}
+	m.transcriptDirty = false
+	m.viewport.SetContent(m.transcriptContent())
 	m.viewport.GotoBottom()
+}
+
+// transcriptContent joins the rendered blocks, capped to the trailing window.
+func (m *Model) transcriptContent() string {
+	blocks := m.blocks
+	if len(blocks) > viewportTailBlocks {
+		blocks = blocks[len(blocks)-viewportTailBlocks:]
+	}
+	if len(blocks) == 1 {
+		return blocks[0]
+	}
+	// Pre-size the builder: the joined length is what the allocation would be
+	// anyway, and this avoids repeated growth on a large transcript.
+	total := 0
+	for _, b := range blocks {
+		total += len(b) + 2
+	}
+	var sb strings.Builder
+	sb.Grow(total)
+	for i, b := range blocks {
+		if i > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(b)
+	}
+	return sb.String()
 }

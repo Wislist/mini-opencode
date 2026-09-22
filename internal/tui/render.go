@@ -24,7 +24,8 @@ func (m *Model) View() string {
 	m.fitViewport(header, footer)
 	m.updateNativeCursorPosition(header, footer)
 
-	sections := []string{header, m.viewport.View()}
+	sections := make([]string, 0, len(footer)+2)
+	sections = append(sections, header, m.viewport.View())
 	sections = append(sections, footer...)
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
@@ -32,7 +33,80 @@ func (m *Model) View() string {
 // renderFooter returns every section below the transcript viewport. Keeping
 // these sections together lets fitViewport reserve their actual rendered
 // height instead of relying on a fixed subtraction that leaves stale rows.
+//
+// The result is memoized against footerDirty. View() runs on every message —
+// including each spinner tick — and rebuilding the todo panel, input bar and
+// help bar plus measuring every section with lipgloss was measurable work per
+// frame, even though none of those sections change between ticks.
 func (m *Model) renderFooter() []string {
+	if !m.footerDirty && m.cachedFooter != nil {
+		return m.cachedFooter
+	}
+	sections := m.buildFooter()
+	m.cachedFooter = sections
+	m.footerDirty = false
+	return sections
+}
+
+// invalidateFooter marks the memoized footer stale. It must be called whenever
+// a field the footer renders changes: the app state, the todo list, the input
+// value, the mode, the session list, or the window size.
+func (m *Model) invalidateFooter() {
+	m.footerDirty = true
+}
+
+// footerSection identifies each section of the footer so callers can measure the
+// area above the input bar without re-deriving the layout. Detection by content
+// is not reliable: lipgloss drops border color when it decides no color profile
+// is available, which left the input bar indistinguishable from the todo panel.
+type footerSection int
+
+const (
+	footerSectionOther footerSection = iota
+	footerSectionInputBar
+)
+
+// footerKinds lists one entry per footer section, in render order. It must stay
+// in lockstep with buildFooter, which is why both are derived in one place.
+func (m *Model) footerKinds() []footerSection {
+	kinds := make([]footerSection, 0, 4)
+	switch {
+	case m.state == statePermission && m.pendingPerm != nil:
+		kinds = append(kinds, footerSectionOther)
+	case m.state == statePlanApproval && m.pendingPlan != nil:
+		kinds = append(kinds, footerSectionOther)
+	case m.state == stateKeyPrompt:
+		kinds = append(kinds, footerSectionOther)
+	case m.state == stateSessionList:
+		kinds = append(kinds, footerSectionOther)
+	default:
+		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
+			kinds = append(kinds, footerSectionOther)
+		}
+		if panel := m.renderTodoPanel(); panel != "" {
+			kinds = append(kinds, footerSectionOther)
+		}
+		kinds = append(kinds, footerSectionInputBar)
+	}
+	return append(kinds, footerSectionOther)
+}
+
+// footerSectionsAboveInput sums the heights of the sections sitting above the
+// input bar. kinds and footer come from footerKinds and renderFooter, which walk
+// the same layout, so the count is exact even when the todo panel, the command
+// menu, or both are present.
+func footerSectionsAboveInput(footer []string, kinds []footerSection) int {
+	height := 0
+	for i, section := range footer {
+		if i < len(kinds) && kinds[i] == footerSectionInputBar {
+			break
+		}
+		height += lipgloss.Height(section)
+	}
+	return height
+}
+
+func (m *Model) buildFooter() []string {
 	var sections []string
 	if m.state == statePermission && m.pendingPerm != nil {
 		sections = append(sections, m.renderPermissionPrompt())
@@ -168,16 +242,20 @@ func (m *Model) renderGitSegment() string {
 	return strings.Join(parts, "")
 }
 
-// renderContextSegment renders the context usage indicator. The token count
-// prefers the provider-reported prompt size, so the percentage reflects the
-// real prompt and not just a character heuristic.
+// renderContextSegment renders the context usage indicator.
+//
+// The percentage is of the whole prompt, because that is what the window limit
+// applies to. The system prompt is a large fixed floor (tens of KB of template,
+// tool instructions and AGENTS.md), so the indicator also shows how much of the
+// total is the conversation: otherwise clearing the session with /newsession
+// barely moves the number and looks like the reset failed.
 func (m *Model) renderContextSegment() string {
 	if m.runtime == nil {
 		return dimStyle.Render("ctx 0%")
 	}
-	tokens := m.runtime.ContextTokens()
-	pct := contextPercent(tokens, m.cfg.Provider.EffectiveContextWindow())
-	return renderContextBar(pct)
+	details := m.runtime.ContextDetails()
+	pct := contextPercent(details.Total(), m.cfg.Provider.EffectiveContextWindow())
+	return renderContextBar(pct, details.ConversationTokens)
 }
 
 func (m *Model) renderInputBar() string {
@@ -211,10 +289,10 @@ func (m *Model) renderPermissionPrompt() string {
 
 func (m *Model) renderHelpBar() string {
 	if m.state == stateRunning {
-		return spinnerStyle.Render(m.spinner.View()) + " " + dimStyle.Render("thinking...  ctrl+c to interrupt")
+		return spinnerStyle.Render(m.spinner.View()) + " " + dimStyle.Render("thinking...  esc to interrupt")
 	}
 	if m.state == stateCompacting {
-		return spinnerStyle.Render(m.spinner.View()) + " " + dimStyle.Render("compacting...  ctrl+c to interrupt")
+		return spinnerStyle.Render(m.spinner.View()) + " " + dimStyle.Render("compacting...  esc to interrupt")
 	}
 	// Adapt the command hint to the available width so it never overflows
 	// or garbles on narrow terminals.
@@ -288,17 +366,27 @@ func (m *Model) renderStatus() string {
 		lines = append(lines, "  "+dimStyle.Render("not a git repository"))
 	}
 	if m.runtime != nil {
-		tokens := m.runtime.ContextTokens()
+		details := m.runtime.ContextDetails()
+		tokens := details.Total()
 		window := m.cfg.Provider.EffectiveContextWindow()
 		pct := contextPercent(tokens, window)
 		source := "estimated"
-		if m.runtime.Usage().PromptTokens > 0 {
+		if details.Reported > 0 {
 			source = "provider-reported prompt size"
 		}
 		ctxLine := fmt.Sprintf("  %s  %s tokens  %.0f%% of %s  (%d messages, %s)",
 			cmdStyle.Render("ctx"), formatTokens(tokens), pct, formatTokens(window),
 			len(m.runtime.Messages()), source)
 		for _, wl := range wrapLine(ctxLine, m.width) {
+			lines = append(lines, wl)
+		}
+		// Spell out the fixed floor. Without this the total barely moves when
+		// the conversation is cleared, which reads as a broken reset rather
+		// than as "the system prompt is most of what you are seeing".
+		breakdownLine := fmt.Sprintf("  %s  %s system prompt + tools, %s conversation",
+			dimStyle.Render("     "), formatTokens(details.SystemTokens),
+			formatTokens(details.ConversationTokens))
+		for _, wl := range wrapLine(breakdownLine, m.width) {
 			lines = append(lines, wl)
 		}
 		if auto := m.runtime.AutoCompactions(); auto > 0 {
@@ -388,22 +476,26 @@ func (m *Model) renderModeSegment() string {
 	return style.Foreground(colorOrange).Render(label)
 }
 
+// inputBorderColor returns the border color of the input bar for the current
+// mode.
+func inputBorderColor(plan bool) lipgloss.Color {
+	if plan {
+		return colorBlue
+	}
+	return colorOrange
+}
+
 // inputBorderStyle returns the input border color for the current mode.
 func (m *Model) inputBorderStyle() lipgloss.Style {
-	c := colorOrange
-	if m.mode == ModePlan {
-		c = colorBlue
-	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(c).Padding(0, 1)
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(inputBorderColor(m.mode == ModePlan)).
+		Padding(0, 1)
 }
 
 // promptStyleM returns the prompt glyph style for the current mode.
 func (m *Model) promptStyleM() lipgloss.Style {
-	c := colorOrange
-	if m.mode == ModePlan {
-		c = colorBlue
-	}
-	return lipgloss.NewStyle().Foreground(c).Bold(true)
+	return lipgloss.NewStyle().Foreground(inputBorderColor(m.mode == ModePlan)).Bold(true)
 }
 
 // userLabelStyle returns the user message label style for the current mode.
@@ -457,10 +549,15 @@ func contextPercent(used, window int) float64 {
 	return float64(used) / float64(window) * 100
 }
 
-// renderContextBar renders the context percentage with a compact bar and
-// color-coded by usage tier (green < 60%, yellow < 85%, red otherwise).
-func renderContextBar(pct float64) string {
+// renderContextBar renders the context indicator, color-coded by usage tier
+// (green < 60%, yellow < 85%, red otherwise). The percentage is of the total
+// prompt; conversationTokens is the part that is the actual conversation, shown
+// so a cleared session reads as cleared rather than as an unchanged percentage.
+func renderContextBar(pct float64, conversationTokens int) string {
 	label := fmt.Sprintf("ctx %.0f%%", pct)
+	if conversationTokens > 0 {
+		label = fmt.Sprintf("ctx %.0f%% · %s chat", pct, formatTokens(conversationTokens))
+	}
 	switch {
 	case pct < 60:
 		return ctxLowStyle.Render(label)
@@ -598,6 +695,16 @@ func renderDiffLines(preview string, width int) string {
 		default:
 			lines = append(lines, dimStyle.Render(line))
 		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// indentLines prefixes every line of text, for indenting a block under a
+// one-line notice.
+func indentLines(text, prefix string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
 }

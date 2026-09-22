@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"io"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -59,6 +60,50 @@ func TestNativeCursorPositionKeepsInputCursorStableWithCommandMenu(t *testing.T)
 	// remains stable at the bottom of the terminal.
 	if row != 22 {
 		t.Fatalf("row = %d, want 22", row)
+	}
+}
+
+// TestNativeCursorPositionTracksInputWithTodoPanel is the regression test for
+// the duplicated cursor when a todo list is active. The footer then starts with
+// the todo panel instead of the command menu, which previously shifted the
+// native cursor down onto the panel's last row and left the input box without
+// one.
+func TestNativeCursorPositionTracksInputWithTodoPanel(t *testing.T) {
+	cfg := config.Default()
+	m := New(&cfg, t.TempDir(), "test")
+	if _, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24}); cmd != nil {
+		t.Fatal("WindowSizeMsg returned an unexpected command")
+	}
+	m.state = stateIdle
+	m.todos = "[x] wire mcp\n[>] add todo tool\n(1/2 done)"
+	m.input.Focus()
+	m.input.SetValue("hi")
+	m.input.CursorEnd()
+
+	view := m.View()
+
+	col, row, ok := m.NativeCursorPosition()
+	if !ok {
+		t.Fatal("NativeCursorPosition ok = false")
+	}
+	// The todo panel is absorbed by shrinking the viewport, so the input row
+	// stays where it is in the common layout.
+	if row != 22 {
+		t.Fatalf("row = %d, want 22", row)
+	}
+	if col != 7 {
+		t.Fatalf("col = %d, want 7", col)
+	}
+	// The cursor must sit on the row that actually draws the input box: the
+	// last row carrying the input border color is the box's bottom edge, and
+	// the cursor has to be one row above it.
+	lines := strings.Split(view, "\n")
+	if row > len(lines) {
+		t.Fatalf("cursor row %d outside view of %d lines", row, len(lines))
+	}
+	inputRow := lines[row-1]
+	if !strings.Contains(inputRow, "hi") {
+		t.Fatalf("cursor row %q does not contain the input value", inputRow)
 	}
 }
 

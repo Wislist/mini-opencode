@@ -42,10 +42,12 @@ func (m *Model) computeNativeCursorPosition(header string, footer []string) (col
 
 	switch m.state {
 	case stateIdle:
-		preFooterHeight := 0
-		if m.commandMenuOpen() && len(m.commandFiltered) > 0 && len(footer) > 0 {
-			preFooterHeight = lipgloss.Height(footer[0])
-		}
+		// Count the panel above the input from the shared footer layout. The
+		// panel is not always the command menu: the todo panel takes its place
+		// when the menu is closed, and treating footer[0] as the menu pushed
+		// the native cursor — and the IME pre-edit text — down onto the todo
+		// panel's last row instead of into the input.
+		preFooterHeight := footerSectionsAboveInput(footer, m.footerKinds())
 		// Input bar has a top border, then the editable content row.
 		row = baseRow + preFooterHeight + 2
 		col = inputBarCursorColumn(m.input)
@@ -59,6 +61,7 @@ func (m *Model) computeNativeCursorPosition(header string, footer []string) (col
 		return 0, 0, false
 	}
 }
+
 
 func inputBarCursorColumn(input textinput.Model) int {
 	// renderInputBar lays out: left border, left padding, "❯", space,

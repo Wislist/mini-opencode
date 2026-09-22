@@ -40,7 +40,7 @@ func (m *Model) handlePlanApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingPlan = nil
 		m.mode = ModeCode
 		if m.planHook != nil {
-			m.planHook.Active = false
+			m.planHook.SetActive(false)
 		}
 		m.state = stateRunning
 		m.refreshViewport()
@@ -83,14 +83,14 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.commandMenuMove(-1)
 			return m, nil
 		}
-		m.viewport.LineUp(1)
+		m.scrollLines(-keyScrollLines)
 		return m, nil
 	case tea.KeyDown:
 		if m.commandMenuOpen() {
 			m.commandMenuMove(1)
 			return m, nil
 		}
-		m.viewport.LineDown(1)
+		m.scrollLines(keyScrollLines)
 		return m, nil
 	case tea.KeyTab:
 		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
@@ -125,7 +125,7 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
-	case tea.KeyCtrlC:
+	case tea.KeyEsc, tea.KeyCtrlC:
 		if m.cancel != nil {
 			m.cancel()
 		}
@@ -136,16 +136,16 @@ func (m *Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, textinput.Blink
 	case tea.KeyUp:
-		m.viewport.LineUp(1)
+		m.scrollLines(-keyScrollLines)
 	case tea.KeyDown:
-		m.viewport.LineDown(1)
+		m.scrollLines(keyScrollLines)
 	}
 	return m, nil
 }
 
 func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
-	case tea.KeyCtrlC:
+	case tea.KeyEsc, tea.KeyCtrlC:
 		if m.cancel != nil {
 			m.cancel()
 		}
@@ -155,9 +155,9 @@ func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, textinput.Blink
 	case tea.KeyUp:
-		m.viewport.LineUp(1)
+		m.scrollLines(-keyScrollLines)
 	case tea.KeyDown:
-		m.viewport.LineDown(1)
+		m.scrollLines(keyScrollLines)
 	}
 	return m, nil
 }
