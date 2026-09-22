@@ -18,11 +18,13 @@ result.
 | `job_output` | Read output and status of a background job. |
 | `job_kill` | Terminate a background job. |
 | `todo_write` | Record or update the session task list. |
+| `todo_blocked` | Report a real blocker and stop the task-list chain. |
 | `exit_plan_mode` | Submit a plan for approval and leave plan mode. |
 | `task` | Delegate a read-only investigation to a subagent. |
 | `web_fetch` | Fetch an http(s) URL and return readable text. |
 | `web_search` | Search the web through a configured endpoint. |
 | `install_skill` | Install a `SKILL.md` skill from a curated name, local path, or GitHub repo. |
+| `memory` | Read and write durable notes that outlive the conversation (see `docs/memory.md`). |
 
 `bash` uses `os/exec` with `bash -lc`, not `mvdan/sh`. It supports command
 validation, banned-command checks, working directory validation, output
@@ -59,6 +61,31 @@ Mutating file tools are wired to a session-scoped observer:
 
 `/undo` restores the newest snapshot of the session. The rule can be disabled
 with `"workspace": {"require_read_before_write": false}`.
+
+## Task list
+
+`todo_write` records the plan and `todo_blocked` reports a blocker; both are
+read-only from the permission point of view. The run loop consumes the stored
+list (see the task-list execution chain in [commands.md](commands.md)): it keeps
+the run going while items remain and stops when the agent reports a blocker or
+the list is complete. The runtime reads the list through the `TodoReader`
+interface and reacts to the `todos`/`rendered` and `blocked`/`reason` metadata
+keys, so it never imports this package.
+
+`TodoReader.Load` is called from the run goroutine. An implementation must be
+safe for that call; the shipped session-backed reader serializes on the session
+store's own lock.
+
+## Memory
+
+`memory` is a single tool with an `action` switch (`write`, `search`, `read`,
+`list`, `delete`) rather than several tools, which keeps the schema count down.
+It is declared read-only because notes live under `.mini-opencode/` and never
+touch the workspace, so it stays usable in plan mode and never prompts.
+
+The tool is constructed as `nil` when no store is configured, so callers
+register it unconditionally. Full behavior, file format, and recall scoring are
+in [memory.md](memory.md).
 
 ## Task delegation
 
