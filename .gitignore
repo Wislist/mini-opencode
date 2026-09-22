@@ -8,6 +8,7 @@ config.json
 # Built binaries.
 cmd/mini-opencode/mini-opencode
 /mini-opencode
+/bin/
 
 # macOS noise.
 .DS_Store

@@ -24,11 +24,17 @@
 - 标准库 CLI 壳（非终端 stdin）与 Bubble Tea TUI（终端）
 - `internal/agent` runtime：turn loop、event stream、hook 链、usage 累计
 - provider 抽象：`echo` 与 OpenAI 兼容（SSE 流式、usage、retry/backoff、可配置 timeout）
-- 工具集：bash/read/write/edit/ls/glob/grep/job_output/job_kill/todo_write/exit_plan_mode/task/web_fetch/web_search/install_skill
+- 工具集：bash/read/write/edit/ls/glob/grep/job_output/job_kill/todo_write/todo_blocked/exit_plan_mode/task/web_fetch/web_search/install_skill/memory
 - 文件观察：read-before-write + 改动前快照 + `/undo`
 - 并发：只读工具同一批次并发执行，写操作串行；runtime 状态加锁，`go test -race ./...` 通过
 - 权限：deny/confirm 策略、会话级 always-allow、写操作 diff 预览
 - Plan 模式闭环：只读约束 + `exit_plan_mode` 提交 + 审批后继续实现
+- todo 执行链：列表未完成的项由 runtime 自动续跑，阻塞由 agent 通过 `todo_blocked` 自行判定
+- run 级重试：整轮 provider 失败自动重试，transcript 不丢、工具不重复执行
+- 上下文压缩：按剩余余量触发（crush 式阈值）；**非破坏性**——摘要追加并标记，原文保留在
+  内存与 SQLite，只在发给 provider 时截断；压缩时把 todo 列表并入总结指令
+- 会话检索：FTS5 全文索引 `messages`，触发器随写同步，可搜索历史会话- 跨会话记忆：`.mini-opencode/memory/*.md`（人类可读可编辑），`memory` 工具主动写入 +
+  run 结束后台自动提炼；召回按相关性只注入前 3 条，`/memory` 查看
 - MCP：启动 stdio server、握手、工具以 `<server>__<tool>` 注册、`/mcp` 查看状态
 - 会话：SQLite 持久化、message parts、归档、todos、token 统计、`parent_session_id` 分支（`/fork`）
 - Prompt：coder/summary/initialize/title/task/agentic_fetch 模板全部接入
@@ -43,7 +49,8 @@ internal/agent        agent 核心工作流（runtime/provider/hook/permission�
 internal/agent/prompt Prompt 组装与模板
 internal/agent/tools  工具实现与指令模板
 internal/mcp          MCP stdio client、manager 与工具适配
-internal/session      SQLite 会话存储（messages/files/read_files/todos）
+internal/session      SQLite 会话存储（messages/files/read_files/todos + FTS5 全文检索）
+internal/memory       跨会话记忆（Markdown 笔记、自动提炼、按需召回）
 internal/skills       Skill 存取与安装（curated/local/GitHub）
 internal/tui          Bubble Tea 界面
 internal/diffutil     权限提示用的行级 diff
@@ -55,13 +62,34 @@ docs/tools.md         Tools 说明
 docs/providers.md     Provider 配置说明
 docs/skills.md        Skills 说明
 docs/hooks.md         Hooks（危险行为拦截 / 循环检测 / plan 模式）说明
+docs/memory.md        跨会话记忆（文件格式、自动提炼、召回策略）
 ```
 
 ## 运行
 
 ```bash
-go run ./cmd/mini-opencode
+make run          # 带 git 版本号跑 TUI
+make build        # 构建到 bin/mini-opencode
+make check        # fmt-check + vet + test
+make help         # 全部目标
+
+go run ./cmd/mini-opencode   # 也可以直接跑，版本号用源码兜底值
 ```
+
+## 版本号
+
+`make build` 用 git 信息自动注入版本号，不需要手动维护：
+
+| 状态 | 报告的版本 |
+| --- | --- |
+| 正好在 tag 上 | `0.4.0` |
+| tag 后有 N 个提交 | `0.4.0-dev.N.g<sha>` |
+| 没有任何 tag | `0.4.0-dev.g<sha>` |
+| 工作区有未提交改动 | 追加 `-dirty` |
+
+基线版本只在 `internal/app/app.go` 定义一处，`scripts/version.sh` 从那里读取，所以
+**改版本号只需要改那一行**。发版：改 base → `make tag`。
+
 
 ## Workspace 访问范围
 
