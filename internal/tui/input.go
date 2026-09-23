@@ -363,24 +363,15 @@ func (m *Model) handleRuntimeEvent(event agent.Event) tea.Cmd {
 		}
 	case agent.EventToolCallFinished:
 		if event.ToolResult != nil {
-			resultWidth := max(1, m.width-2)
-			if event.ToolResult.Error != "" {
-				m.addBlock(toolError.Width(resultWidth).Render("✗ " + event.ToolResult.Error))
-			} else {
-				content := event.ToolResult.Content
-				if len(content) > 200 {
-					content = content[:200] + "..."
-				}
-				m.addBlock(toolArrow.Width(resultWidth).Render("→ " + content))
-			}
+			m.addBlock(m.renderToolResult(event.ToolResult))
 		}
 		m.saveCurrentSession()
 	case agent.EventToolCallFailed, agent.EventToolPermissionDenied:
-		errWidth := max(1, m.width-2)
-		if event.ToolResult != nil && event.ToolResult.Error != "" {
-			m.addBlock(toolError.Width(errWidth).Render("✗ " + event.ToolResult.Error))
+		if event.ToolResult != nil && (event.ToolResult.Error != "" || event.ToolResult.Content != "") {
+			m.addBlock(m.renderToolResult(event.ToolResult))
 		}
 		if event.Error != nil && event.Error.Error() != "" {
+			errWidth := max(1, m.width-2)
 			m.addBlock(toolError.Width(errWidth).Render("✗ " + event.Error.Error()))
 		}
 	case agent.EventTodoContinuation:

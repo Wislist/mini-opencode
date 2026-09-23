@@ -333,6 +333,63 @@ func (m *Model) renderToolCall(call *agent.ToolCall) string {
 	return toolBox.Width(w).Render(toolName.Render(name) + "\n" + dimStyle.Render(detail))
 }
 
+// toolResultMaxRows bounds how much tool output is shown. Tool results are the
+// bulkiest thing in the transcript (a `read` returns a whole file), and the
+// transcript is unbounded, so the box shows a window of the output instead of
+// all of it. The marker tells the reader how much was hidden, so a partial view
+// is never mistaken for the whole result.
+const toolResultMaxRows = 12
+
+// renderToolResult renders a finished tool result as a bordered box.
+//
+// It mirrors renderToolCall: the call and its output are two halves of the same
+// unit, so both are boxed. Emitting the output as a bare "→ ..." line lost the
+// output's own line structure and made code, diffs and file contents
+// indistinguishable from prose.
+func (m *Model) renderToolResult(result *agent.ToolResult) string {
+	w := boxWidth(m)
+	contentWidth := max(1, w-4) // border(2) + padding(2)
+
+	marker, text := "→ ", result.Content
+	if result.Error != "" {
+		marker, text = "✗ ", result.Error
+	}
+
+	body := toolResultBody(text, contentWidth)
+	if len(body) == 0 {
+		body = []string{dimStyle.Render("(no output)")}
+	}
+	header := toolArrow.Render(marker)
+	return toolBox.Width(w).Render(header + strings.Join(body, "\n"))
+}
+
+// toolResultBody wraps and caps tool output so it fits the box. Wrapping uses
+// display width, so CJK output no longer breaks, and the truncation marker
+// replaces the old raw byte slice that could cut a UTF-8 sequence in half.
+//
+// Only output that is entirely whitespace counts as "no output": a result made
+// of blank lines is still something the tool returned, and reporting it as
+// empty would hide that.
+func toolResultBody(text string, width int) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+
+	wrapped := wordWrap(strings.TrimRight(text, "\n"), width)
+	if strings.TrimSpace(wrapped) == "" {
+		return nil
+	}
+
+	lines := strings.Split(wrapped, "\n")
+	if len(lines) <= toolResultMaxRows {
+		return lines
+	}
+	hidden := len(lines) - toolResultMaxRows
+	lines = lines[:toolResultMaxRows]
+	lines = append(lines, codeOmittedStyle.Render(fmt.Sprintf("⋯ (%d more lines)", hidden)))
+	return lines
+}
+
 func (m *Model) renderTools() string {
 	if m.runtime == nil {
 		return dimStyle.Render("no runtime")
