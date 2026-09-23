@@ -175,32 +175,20 @@ func TestViewportAppendBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("超出尾部窗口上限仍可用", func(t *testing.T) {
+	t.Run("超出历史长度仍可用", func(t *testing.T) {
 		m := perfTestModel(t, 80, 24)
-		fillTranscript(m, viewportTailBlocks+50)
+		fillTranscript(m, 500)
 		if m.viewport.View() == "" {
-			t.Fatal("超出尾部窗口后视图为空")
+			t.Fatal("长会话视图为空")
 		}
+		// The whole transcript stays reachable; see TestTranscriptKeepsFullHistory.
 		content := m.transcriptContent()
-		// The window keeps the newest blocks, so the oldest ones must be gone
-		// and the most recent must be present.
 		newest := fmt.Sprintf("block %02d", len(m.blocks)-1)
 		if !strings.Contains(content, newest) {
-			t.Fatalf("最新的块 %q 不在窗口内", newest)
+			t.Fatalf("最新的块 %q 缺失", newest)
 		}
-		if strings.Contains(content, "block 00 ") {
-			t.Fatal("最旧的块仍在窗口内，窗口没有生效")
-		}
-	})
-
-	t.Run("窗口随追加滚动", func(t *testing.T) {
-		m := perfTestModel(t, 80, 24)
-		fillTranscript(m, transcriptWindowBlocks*2)
-		content := m.transcriptContent()
-		lines := strings.Count(content, "\n") + 1
-		// The rendered content must stay bounded as the transcript grows.
-		if lines > transcriptWindowBlocks*8 {
-			t.Fatalf("窗口内容 %d 行，没有随窗口收敛", lines)
+		if !strings.Contains(content, "block 00 ") {
+			t.Fatal("最旧的块丢失，回溯历史被截断")
 		}
 	})
 

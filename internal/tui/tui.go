@@ -189,6 +189,13 @@ type Model struct {
 	// viewportRebuildBytes counts the bytes pushed into the viewport. Tests use
 	// it to prove an append does not rebuild the whole transcript.
 	viewportRebuildBytes int
+	// viewportLinesBuilt is how many blocks the viewport currently holds, so an
+	// append can extend it instead of rebuilding. Zero forces a full rebuild.
+	viewportLinesBuilt int
+	// viewportLines is the transcript pre-split into lines, kept so an append
+	// extends the slice rather than re-splitting the whole text. The viewport
+	// exposes no getter, so the model owns it.
+	viewportLines []string
 	// footerDirty marks the memoized footer sections stale; see renderFooter
 	// in render.go. It defaults to true so the first render builds them.
 	cachedFooter []string
@@ -686,6 +693,10 @@ func (m *Model) addBlock(block string) {
 // directly must call this.
 func (m *Model) markBlocksChanged() {
 	m.transcriptDirty = true
+	// An in-place edit invalidates the incremental state: the affected block is
+	// not necessarily the last one, so the line slice must be rebuilt from
+	// scratch rather than extended.
+	m.viewportLinesBuilt = 0
 }
 
 // appendBlock adds a block and pushes only that block into the viewport.
@@ -701,19 +712,60 @@ func (m *Model) appendBlock(block string) {
 	m.transcriptDirty = true
 }
 
-// transcriptWindowBlocks is how many trailing blocks the viewport holds.
+// transcriptContentLines turns every block into viewport lines.
 //
-// viewport.SetContent is O(total characters): it normalizes line endings, splits
-// the text into lines and scans for the longest line. Handing it the whole
-// transcript made every appended block cost more as the conversation grew,
-// which is what stuttered while tools ran. The viewport can only display one
-// screenful, so it is given a bounded tail: enough to scroll back through
-// recent output, at a cost independent of how long the session has run.
-const transcriptWindowBlocks = 60
+// The viewport holds the WHOLE transcript, not a trailing window: an earlier
+// version capped it to the last 60 blocks to cut per-append cost, which made the
+// beginning of a long conversation unreachable by scrolling even though the data
+// was still in memory and in SQLite. Losing history is not an acceptable price
+// for a faster append; the cost is handled by only rebuilding when the block set
+// actually changes (see syncViewportLines).
+//
+// Blocks are pre-split here so the viewport does not have to split the joined
+// string again on every update.
+func (m *Model) transcriptContentLines() []string {
+	if len(m.blocks) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(m.blocks)*2+1)
+	for i, block := range m.blocks {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, strings.Split(block, "\n")...)
+	}
+	return lines
+}
 
-// viewportTailBlocks bounds how many blocks the transcript keeps available at
-// all; older blocks are dropped from rendering but remain in memory.
-const viewportTailBlocks = 400
+// syncViewportLines pushes the transcript into the viewport, reusing the
+// previous content when only new blocks were appended.
+//
+// viewport.SetContentLines scans every line to find the longest one, so pushing
+// the whole transcript on every tool result is what made tool-heavy turns
+// stutter. Appending to the existing line slice preserves full scrollback while
+// keeping the common case proportional to the new block rather than to the
+// whole conversation.
+func (m *Model) syncViewportLines() {
+	if m.viewportLinesBuilt > len(m.blocks) {
+		// The transcript shrank (compact, undo, session switch): rebuild.
+		m.viewportLinesBuilt = 0
+		m.viewportLines = m.viewportLines[:0]
+	}
+	if m.viewportLinesBuilt == 0 {
+		m.viewportLines = m.transcriptContentLines()
+		m.viewportRebuildBytes += len(m.viewportLines)
+	} else {
+		lines := m.viewportLines
+		for i := m.viewportLinesBuilt; i < len(m.blocks); i++ {
+			lines = append(lines, "")
+			lines = append(lines, strings.Split(m.blocks[i], "\n")...)
+			m.viewportRebuildBytes += len(m.blocks[i]) + 1
+		}
+		m.viewportLines = lines
+	}
+	m.viewport.SetContentLines(m.viewportLines)
+	m.viewportLinesBuilt = len(m.blocks)
+}
 
 // refreshViewport brings the viewport up to date, and follows new content to the
 // bottom only when the user is already there.
@@ -726,27 +778,38 @@ const viewportTailBlocks = 400
 func (m *Model) refreshViewport() {
 	follow := m.viewport.AtBottom()
 	if m.transcriptDirty {
-		m.rebuildViewport()
+		// syncViewportLines extends the line slice when the change was a pure
+		// append and falls back to a full rebuild otherwise, so appending does
+		// not cost O(whole transcript).
+		m.transcriptDirty = false
+		m.syncViewportLines()
 	}
 	if follow {
 		m.viewport.GotoBottom()
 	}
 }
 
-// rebuildViewport re-derives the viewport content from the trailing window.
+// rebuildViewport rewrites the viewport from the current blocks.
+//
+// An in-place edit anywhere (not just an append) invalidates the incremental
+// state, so the whole transcript is re-derived once and marked built.
 func (m *Model) rebuildViewport() {
 	m.transcriptDirty = false
-	content := m.transcriptContent()
-	m.viewportRebuildBytes += len(content)
-	m.viewport.SetContent(content)
+	m.viewportLinesBuilt = 0
+	m.syncViewportLines()
 }
 
-// transcriptContent joins the rendered blocks, capped to the trailing window.
+// markViewportStale forces the next refresh to rebuild the viewport from the
+// blocks, for callers that replaced the transcript wholesale.
+func (m *Model) markViewportStale() {
+	m.transcriptDirty = true
+	m.viewportLinesBuilt = 0
+}
+
+// transcriptContent joins every block, for callers that need the text (tests,
+// selection). It is not used for the viewport any more.
 func (m *Model) transcriptContent() string {
 	blocks := m.blocks
-	if len(blocks) > transcriptWindowBlocks {
-		blocks = blocks[len(blocks)-transcriptWindowBlocks:]
-	}
 	if len(blocks) == 1 {
 		return blocks[0]
 	}

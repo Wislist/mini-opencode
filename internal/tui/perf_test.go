@@ -46,17 +46,23 @@ func TestRefreshViewportIsCheapWhenUnchanged(t *testing.T) {
 	}
 }
 
-// TestTranscriptContentIsCapped asserts the joined transcript stays bounded so
-// per-frame cost cannot grow with session length.
-func TestTranscriptContentIsCapped(t *testing.T) {
-	m := perfModel(viewportTailBlocks*3 + 17)
+// TestTranscriptKeepsFullHistory asserts the transcript is never windowed.
+//
+// This used to assert the opposite — that the oldest blocks were absent from the
+// rendered content — because the viewport was capped to a trailing window to cut
+// per-append cost. That traded away scrollback: a long conversation could not be
+// scrolled back to its beginning even though the data existed. The cap is gone;
+// append cost is bounded by extending the line slice instead of re-splitting the
+// whole text (see syncViewportLines).
+func TestTranscriptKeepsFullHistory(t *testing.T) {
+	const total = 900
+	m := perfModel(total)
 	content := m.transcriptContent()
 
-	// Only the tail is rendered, so the oldest blocks must be absent.
-	if strings.Contains(content, "block 0:") {
-		t.Fatal("transcript includes the head of a very long history")
+	if !strings.Contains(content, "block 0:") {
+		t.Fatal("transcript lost the head of a long history")
 	}
-	last := fmt.Sprintf("block %d:", viewportTailBlocks*3+16)
+	last := fmt.Sprintf("block %d:", total-1)
 	if !strings.Contains(content, last) {
 		t.Fatalf("transcript is missing its most recent block %q", last)
 	}

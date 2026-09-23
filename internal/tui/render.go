@@ -14,6 +14,21 @@ import (
 	"github.com/wislist/mini-opencode/internal/agent/tools"
 )
 
+// measureTextWidth returns the display width of a string in the same profile
+// lipgloss will use for the final render.
+//
+// The tui builds its own plain frame (renderFrame) instead of using
+// lipgloss.Width for layout decisions, and the two do not always agree: with no
+// color profile, lipgloss drops the style that renders the truncation marker
+// and the marker loses a "…" from its width. Measuring a fragment with
+// lipgloss.Width and laying it out against a frame measured with
+// ansi.StringWidth therefore undercounts by the difference, which is what made
+// a capped tool-call box render two rows over budget. Both sides of a layout
+// calculation must use this function.
+func measureTextWidth(s string) int {
+	return ansi.StringWidth(lipgloss.NewStyle().Render(s))
+}
+
 // ── View ──────────────────────────────────────────────
 
 func (m *Model) View() tea.View {
@@ -35,6 +50,16 @@ func (m *Model) View() tea.View {
 func (m *Model) renderFrame() string {
 	if m.width == 0 {
 		return "loading..."
+	}
+
+	// The viewport must hold the transcript before it is measured: a viewport
+	// with no content renders zero rows, and fitViewport would then size
+	// everything around a viewport that draws nothing, pushing the input box off
+	// the frame. Rendering is the one place that guarantees the content is in
+	// place regardless of who called View.
+	if m.transcriptDirty {
+		m.transcriptDirty = false
+		m.syncViewportLines()
 	}
 
 	header := m.renderHeader()
@@ -189,30 +214,52 @@ func (m *Model) renderHeader() string {
 	versionSeg := dimStyle.Render(fmt.Sprintf("v%s · %s", m.version, m.cfg.Provider.Name))
 	ctxSeg := m.renderContextSegment()
 
-	// Build the right side, dropping context first then version.
+	// Build the right side: context and version are the first things to yield.
+	//
+	// The session title outranks both. It is what identifies the conversation,
+	// and unlike the branch, the permission mode, or the version string it
+	// cannot be recovered from elsewhere — /status shows the rest. Reserving
+	// room for ctx+version unconditionally made the title vanish on a
+	// medium-width terminal (a 60-column window rendered no title at all) while
+	// a version string that is stable for the whole session stayed on screen.
 	var right string
 	rightW := 0
-	if m.width >= titleW+lipgloss.Width(versionSeg)+lipgloss.Width(ctxSeg)+4 {
+	rightReserve := 2 + minSessionTitleWidth
+	switch {
+	case m.width >= titleW+lipgloss.Width(ctxSeg)+lipgloss.Width(versionSeg)+rightReserve+2:
 		right = ctxSeg + "  " + versionSeg
 		rightW = lipgloss.Width(right)
-	} else if m.width >= titleW+lipgloss.Width(versionSeg)+4 {
+	case m.width >= titleW+lipgloss.Width(versionSeg)+rightReserve+2:
 		right = versionSeg
 		rightW = lipgloss.Width(right)
 	}
 
-	// Budget for left-side segments after reserving the right side. The session
-	// title is the only flexible part: it is shortened to whatever is left
-	// instead of being dropped, because the title is what identifies the
-	// conversation. The fixed segments are kept whole.
+	// Budget for left-side segments after reserving the right side.
+	//
+	// The session title is the only flexible part: it is shortened to whatever
+	// is left rather than being dropped, and it outranks the branch and the
+	// permission mode, both of which /status can tell you. The cases below are
+	// ordered by how much they give up, cheapest first, so a narrow terminal
+	// sheds the branch before it sheds the title. (An earlier ordering tested
+	// "branch + mode" before "mode + title", which made the title disappear on a
+	// 60-column window while a recoverable branch stayed on screen.)
 	budget := m.width - titleW - rightW - 2
-	fixed := lipgloss.Width(gitSeg) + lipgloss.Width(modeSeg)
+	gitW := lipgloss.Width(gitSeg)
+	modeW := lipgloss.Width(modeSeg)
 	switch {
-	case budget >= fixed+minSessionTitleWidth:
-		left += gitSeg + m.renderSessionSegment(budget-fixed) + modeSeg
-	case budget >= fixed:
-		left += gitSeg + modeSeg
-	case budget >= lipgloss.Width(modeSeg):
-		left += modeSeg
+	case budget >= gitW+modeW+minSessionTitleWidth:
+		// Everything fits with a usable title.
+		left += gitSeg + m.renderSessionSegment(budget-gitW-modeW) + modeSeg
+	case budget >= modeW+minSessionTitleWidth:
+		// Drop the branch; keep the title and the permission mode.
+		left += m.renderSessionSegment(budget-modeW) + modeSeg
+	case budget >= gitW+minSessionTitleWidth:
+		// Drop the mode; keep the branch and the title.
+		left += gitSeg + m.renderSessionSegment(budget-gitW)
+	case budget >= minSessionTitleWidth:
+		// Only room for the title. It is the one segment that cannot be
+		// recovered from /status, so it wins over both.
+		left += m.renderSessionSegment(budget)
 	}
 	space := max(0, m.width-lipgloss.Width(left)-rightW)
 	return left + strings.Repeat(" ", space) + right
@@ -336,8 +383,11 @@ func (m *Model) renderPermissionPrompt() string {
 	call := m.pendingPerm.call
 	w := boxWidth(m)
 	inner := max(1, w-4) // border(2) + padding(2)
+	// The detail is capped like the transcript's tool-call box: approval prompts
+	// are interactive, and a heredoc-sized command used to fill the whole screen
+	// with the prompt itself and push the question out of view.
 	content := toolName.Render(call.Name) + "\n" +
-		dimStyle.Render(wordWrap(extractToolDetail(call), inner)) + "\n"
+		dimStyle.Render(toolCallDetailBody(extractToolDetail(call), inner)) + "\n"
 	if preview := toolDiffPreview(call, m.workingDir); preview != "" {
 		content += renderDiffLines(preview, inner) + "\n"
 	}
@@ -383,7 +433,13 @@ func (m *Model) renderHelpBar() string {
 			return dimStyle.Render("/help · " + candidate)
 		}
 	}
-	return dimStyle.Render("/help")
+	// Even the shortest shortcut list does not fit. /help is the one hint worth
+	// keeping, but it is still dropped when it cannot fit: the rendering path
+	// never truncates, so an over-wide bar would wrap and displace the input box.
+	if lipgloss.Width("/help") <= m.width {
+		return dimStyle.Render("/help")
+	}
+	return ""
 }
 
 func (m *Model) renderUserMessage(text string) string {
@@ -418,12 +474,64 @@ func (m *Model) renderStreamingMessage(text string) string {
 	return assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" + assistantText.Width(contentWidth).Render(rendered)
 }
 
+// toolCallMaxRows bounds how many rows a tool call may show.
+//
+// Arguments like a whole bash command, a file body, or a search pattern can be
+// arbitrarily long, and they are rendered into the transcript unconditionally.
+// A multi-command bash invocation or a heredoc used to push a wall of text into
+// the transcript and shove the conversation off screen, so the call is shown as
+// a window on its arguments, the same way renderToolResult windows tool output.
+//
+// The budget is deliberately small. It was 12, which still let an ordinary
+// command with an exported environment prefix occupy most of the screen: the
+// transcript is for following the conversation, not for reading back the
+// arguments. Four rows is enough to recognise what a call does; the full
+// command stays in the session, in the model's history, and in the approval
+// prompt shown before a dangerous call runs.
+const toolCallMaxRows = 4
+
 func (m *Model) renderToolCall(call *agent.ToolCall) string {
 	w := boxWidth(m)
 	detailWidth := max(1, w-4) // border(2) + padding(2)
 	name := wordWrap(call.Name, detailWidth)
-	detail := wordWrap(extractToolDetail(*call), detailWidth)
+	// The cap is applied to the wrapped text, not the raw string: a long command
+	// folds into many rows on a narrow terminal, which is exactly the case where
+	// the box grew tall enough to eat the transcript.
+	detail := toolCallDetailBody(extractToolDetail(*call), detailWidth)
 	return toolBox.Width(w).Render(toolName.Render(name) + "\n" + dimStyle.Render(detail))
+}
+
+// toolCallDetailBody wraps tool-call arguments and caps the row count, marking
+// what was hidden. It mirrors toolResultBody so a partial view is never mistaken
+// for the whole argument.
+//
+// The cap is applied after wrapping, so a narrow terminal cannot fold a modest
+// command into more rows than promised. The marker is measured rather than
+// assumed to be one row: it is styled (italic dim) and, at very small widths, it
+// wraps.
+func toolCallDetailBody(detail string, width int) string {
+	// Trim blank edges first: a command that is mostly trailing newlines (or an
+	// argument list that ends in empty lines) would otherwise spend the whole
+	// row budget on nothing.
+	detail = strings.Trim(detail, "\n")
+	lines := strings.Split(wordWrap(detail, width), "\n")
+	if len(lines) <= toolCallMaxRows {
+		return strings.Join(lines, "\n")
+	}
+	for keep := toolCallMaxRows - 1; keep >= 1; keep-- {
+		hidden := len(lines) - keep
+		marker := dimStyle.Render(fmt.Sprintf("⋯ (%d more lines)", hidden))
+		markerRows := strings.Count(wordWrap(marker, width), "\n") + 1
+		if keep+markerRows > toolCallMaxRows {
+			continue
+		}
+		kept := append(append([]string{}, lines[:keep]...),
+			strings.Split(wordWrap(marker, width), "\n")...)
+		return strings.Join(kept, "\n")
+	}
+	// Degenerate width (every row consumes the whole budget): show what fits and
+	// say only that there is more, without a count that would itself wrap.
+	return strings.Join(lines[:toolCallMaxRows-1], "\n") + "\n" + dimStyle.Render("⋯")
 }
 
 // toolResultMaxRows bounds how much tool output is shown. Tool results are the

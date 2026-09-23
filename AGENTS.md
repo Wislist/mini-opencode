@@ -178,13 +178,16 @@ CLI 与 TUI 两条入口都要注册全部三个。
   fence-only 实现做对照，断言**逐字节相同**——改切块逻辑必须跑它。
 - `refreshViewport` 有**脏标记 + 尾部窗口**两层缓存。任何「原地改写 `m.blocks[i]`」或
   `m.blocks = nil` 之后都必须 `markBlocksChanged()`，漏掉会让界面静默停在上一帧。
-- **viewport 只拿一个有界窗口，不是整份 transcript**（`transcriptWindowBlocks = 60`）。
-  `viewport.SetContent` 是 O(传入字符数)：它会 `ReplaceAll` 规范化换行、`Split` 出所有行、
-  再扫一遍算最长行。之前把整份正文喂给它，导致**每次工具事件都重切一遍全文**——
-  实测 500 块时单帧 258µs（占该路径 99%），且随历史线性增长，这就是「调用工具时卡顿」的
-  根因。窗口化后 3000 块也只有 ~30µs 且恒定。
-  **不要为了「保留完整滚动历史」把窗口调回整份**；要更长历史应该另做按需加载，
-  而不是每帧重建。
+- **viewport 持有整份 transcript，历史必须完整可达**。
+  `viewport.SetContent(字符串)` 是 O(总字符数)：`Split` 出所有行 + 扫一遍算最长行。
+  早先版本把 viewport 限制成只渲染最后 60 块来省这笔开销——**代价是用户上滑再也找不到
+  对话开头**（数据还在内存和 SQLite 里，只是渲染不出来）。这个取舍已被否决：
+  **丢历史不是可接受的性能代价**。
+  正确做法是 `syncViewportLines`：行切片缓存在 `m.viewportLines`，**追加时只 append
+  新块拆出的行**，并用 `viewport.SetContentLines`（v2 新增，免去内部再 split）；
+  只有 `markBlocksChanged()`（原地改写/清空）才置 `viewportLinesBuilt = 0` 触发全量重建。
+  实测追加成本与历史长度无关（50 块=101B，1000 块=2001B，仅新块自身）。
+  **`transcriptWindowBlocks` / `viewportTailBlocks` 已删除**，不要重新引入渲染窗口。
 - **`refreshViewport` 只在用户本来就在底部时才 `GotoBottom`**（`follow := AtBottom()`）。
   无条件 `GotoBottom` 会把正在上滑阅读历史的用户强行拽回底部——「生成结论过程中会强制
   将视角拉到最底下」就是这个。滑回底部后跟随会自动恢复。
