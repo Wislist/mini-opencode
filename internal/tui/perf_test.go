@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -126,5 +127,96 @@ func TestTranscriptDirtyTrackedOnInPlaceEdit(t *testing.T) {
 	m.refreshViewport()
 	if !strings.Contains(m.viewport.View(), "replaced block") {
 		t.Fatal("viewport did not pick up the in-place edit")
+	}
+}
+
+// ── Streaming render cost ─────────────────────────────
+//
+// The throttled repaint in stream.go coalesces deltas but cannot make a single
+// frame cheaper: Glamour renders at ~0.5MB/s, so re-rendering a whole 16KB
+// answer costs ~30ms and blows the frame budget on long responses. The
+// paragraph-level cache must make the settled prefix free, so per-frame cost
+// tracks the trailing block rather than the total length.
+
+// BenchmarkStreamingRepaintCost measures the real streaming frame: repaint the
+// accumulated answer with the tail slightly grown, exactly as the throttle
+// timer does. It is a benchmark rather than an assertion because absolute
+// numbers are machine dependent, but each /paras= row must stay far below the
+// uncached row of the same length.
+func BenchmarkStreamingRepaintCost(b *testing.B) {
+	for _, paras := range []int{10, 40, 120} {
+		b.Run(fmt.Sprintf("paras=%d", paras), func(b *testing.B) {
+			m := perfStreamModel(paras)
+			m.renderStreamingMessage(m.streamingText) // warm the cache
+			base := m.streamingText
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				m.streamingText = base + strings.Repeat("x", i%512)
+				_ = m.renderStreamingMessage(m.streamingText)
+			}
+		})
+	}
+}
+
+// BenchmarkStreamingRepaintCostUncached is the reference the cached path is
+// compared against: the same frames rendered with no prefix reuse.
+func BenchmarkStreamingRepaintCostUncached(b *testing.B) {
+	for _, paras := range []int{10, 40, 120} {
+		b.Run(fmt.Sprintf("paras=%d", paras), func(b *testing.B) {
+			m := perfStreamModel(paras)
+			base := m.streamingText
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				m.streamingText = base + strings.Repeat("x", i%512)
+				_ = m.renderAssistantMessage(m.streamingText)
+			}
+		})
+	}
+}
+
+// perfStreamModel builds a model holding a streaming answer of the given many
+// paragraphs plus an open tail.
+func perfStreamModel(paras int) *Model {
+	cfg := config.Config{User: "u", Assistant: "a", Provider: config.ProviderConfig{Name: "deepseek"}}
+	m := New(&cfg, "/tmp", "test")
+	m.width, m.height = 120, 40
+	m.state = stateRunning
+	var sb strings.Builder
+	for i := 0; i < paras; i++ {
+		fmt.Fprintf(&sb, "Paragraph %d with some reasoning text here.\n\n", i)
+	}
+	sb.WriteString("final growing tail")
+	m.streamingText = sb.String()
+	return m
+}
+
+// BenchmarkCollectGitStatus guards the git status cost. It runs synchronously
+// on the UI goroutine from every key press and session switch, and used to cost
+// 41ms because repository detection spawned a git process per directory level.
+func BenchmarkCollectGitStatus(b *testing.B) {
+	wd, err := os.Getwd()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = collectGitStatus(wd)
+	}
+}
+
+// BenchmarkIsGitDirWalk guards repository detection specifically: it must be a
+// stat walk, not a subprocess walk, so it stays in the microsecond range.
+func BenchmarkIsGitDirWalk(b *testing.B) {
+	wd, err := os.Getwd()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = isGitDir(wd)
 	}
 }

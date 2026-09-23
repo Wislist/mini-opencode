@@ -58,6 +58,10 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	planHook := agent.NewPlanModeHook(false)
 	planApprover := cliPlanApprover(scanner, out, planHook)
 	sessionAllowed := map[string]bool{}
+	permissions, err := agent.NewModePermissionPolicy(workingDir, cfg.Workspace.AllowedRoots, cfg.Permissions.Mode)
+	if err != nil {
+		return err
+	}
 
 	// Start configured MCP servers once and reuse their tools across runtime
 	// rebuilds. A failing server is reported but never blocks startup.
@@ -67,6 +71,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	reportMCPFailures(out, mcpManager)
 
 	extras := runtimeExtras{
+		permissions:  permissions,
 		mcpTools:     mcpManager.Tools(),
 		observer:     observer,
 		todos:        todos,
@@ -85,7 +90,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 
 	fmt.Fprintf(out, "mini-opencode %s\n", version)
-	fmt.Fprintln(out, "commands: /help /version /tools /workspace /status /skills /mcp /plan /init /fork /undo /key /compact /session /newsession /archive /quit")
+	fmt.Fprintln(out, "commands: /help /version /tools /workspace /status /permissions /skills /mcp /plan /init /fork /undo /key /compact /session /newsession /archive /quit")
 
 	for {
 		select {
@@ -101,6 +106,18 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 
 		input := strings.TrimSpace(scanner.Text())
 		if input == "" {
+			continue
+		}
+		if input == "/permissions" || strings.HasPrefix(input, "/permissions ") {
+			mode, changed, message := agent.PermissionCommand(permissions.Mode(), input)
+			if changed {
+				if err := runtime.SetPermissionMode(mode); err != nil {
+					fmt.Fprintf(out, "error: %v\n", err)
+					continue
+				}
+				clear(sessionAllowed)
+			}
+			fmt.Fprintln(out, message)
 			continue
 		}
 		// /memory takes an optional search query, so it is matched by prefix
@@ -125,9 +142,11 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		case "/skills":
 			printSkills(out, workingDir)
 		case "/status":
+			statusCfg := cfg
+			statusCfg.Permissions.Mode = permissions.Mode()
 			printStatus(out, statusInput{
 				workingDir: workingDir,
-				cfg:        cfg,
+				cfg:        statusCfg,
 				runtime:    runtime,
 				session:    currentSession,
 				planMode:   planHook.IsActive(),
@@ -351,6 +370,7 @@ func printStatus(out io.Writer, in statusInput) {
 		mode = "plan (read-only)"
 	}
 	fmt.Fprintf(out, "  mode: %s\n", mode)
+	fmt.Fprintf(out, "  permissions: %s · %s\n", in.cfg.Permissions.Mode, in.cfg.Permissions.Mode.Label())
 	fmt.Fprintf(out, "  provider: %s  model: %s\n", in.cfg.Provider.Name, in.cfg.Provider.Model)
 	if in.session != nil {
 		fmt.Fprintf(out, "  session: %s  (%s)\n", in.session.Title, in.session.ID)
@@ -433,6 +453,7 @@ func contextPercent(used, window int) float64 {
 
 func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "mini-opencode is a fresh Go agent terminal project.")
+	fmt.Fprintln(out, "permissions: /permissions [ask|auto-review|full-access] — 请求批准 / 帮我批准 / 完全访问；完全访问需追加 confirm。")
 	fmt.Fprintln(out, "commands: /key <deepseek-api-key> saves a local key and switches provider to DeepSeek.")
 	fmt.Fprintln(out, "sessions: active conversations are stored in .mini-opencode/sessions.db; /archive exports the current session to .mini-opencode/sessions/<id>.json.")
 	fmt.Fprintln(out, "files: /undo restores the newest file snapshot recorded in this session.")
@@ -528,9 +549,11 @@ func printSkills(out io.Writer, workingDir string) {
 // construction needs but that are not part of the config: MCP tools and the
 // session file observer.
 type runtimeExtras struct {
-	mcpTools []agent.Tool
-	observer tools.FileObserver
-	todos    tools.TodoStore
+	// Reused across CLI runtime rebuilds without changing persisted config.
+	permissions *agent.ModePermissionPolicy
+	mcpTools    []agent.Tool
+	observer    tools.FileObserver
+	todos       tools.TodoStore
 	// planHook enforces plan mode; planApprover reviews submitted plans.
 	planHook     *agent.PlanModeHook
 	planApprover tools.PlanApprover
@@ -601,6 +624,14 @@ func runRetries(cfg config.Config) int {
 func subagentRunnerFor(extras runtimeExtras) tools.TaskRunner { return extras.subagent }
 
 func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, out io.Writer, extras runtimeExtras) (*agent.Runtime, error) {
+	permissions := extras.permissions
+	if permissions == nil {
+		var err error
+		permissions, err = agent.NewModePermissionPolicy(workingDir, cfg.Workspace.AllowedRoots, cfg.Permissions.Mode)
+		if err != nil {
+			return nil, err
+		}
+	}
 	promptContext := prompt.DefaultPromptContext(workingDir)
 	contextFiles, err := prompt.DiscoverContextFiles(workingDir, nil)
 	if err != nil {
@@ -644,7 +675,7 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 		agent.WithCompactionThreshold(cfg.Agent.CompactThreshold),
 		agent.WithRunRetries(runRetries(cfg)),
 		agent.WithTodoReader(extras.todoReader),
-		agent.WithPermissionPolicy(agent.NewDefaultPermissionPolicyWithRoots(workingDir, cfg.Workspace.AllowedRoots)),
+		agent.WithPermissionPolicy(permissions),
 		agent.WithPermissionConfirmer(confirmTool(scanner, out, extras.allowedTools, workingDir)),
 		agent.WithHook(agent.NewSafetyHook(workingDir)),
 		agent.WithHook(agent.NewLoopGuardHook()),
@@ -655,6 +686,7 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 
 	codingOptions := tools.CodingToolOptions{
 		WorkDir:                workingDir,
+		FullAccess:             permissions.FullAccess,
 		AllowedRoots:           cfg.Workspace.AllowedRoots,
 		Observer:               extras.observer,
 		RequireReadBeforeWrite: cfg.Workspace.ReadBeforeWrite(),

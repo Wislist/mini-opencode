@@ -21,6 +21,7 @@ type BashTool struct {
 type BashOptions struct {
 	WorkDir             string
 	BannedCommands      []string
+	FullAccess          func() bool
 	MaxOutputLength     int
 	AutoBackgroundAfter time.Duration
 	InstructionData     InstructionData
@@ -162,6 +163,9 @@ func (t *BashTool) resolveWorkingDir(workingDir string) (string, error) {
 }
 
 func (t *BashTool) bannedCommand(command string) string {
+	if t.options.FullAccess != nil && t.options.FullAccess() {
+		return ""
+	}
 	normalized := strings.ToLower(command)
 	for _, banned := range t.options.BannedCommands {
 		banned = strings.TrimSpace(banned)

@@ -3,9 +3,11 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/wislist/mini-opencode/internal/agent"
@@ -14,7 +16,23 @@ import (
 
 // ── View ──────────────────────────────────────────────
 
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
+	v := tea.NewView(m.renderFrame())
+	// In Bubble Tea v2 the alternate screen and mouse reporting are declared
+	// per view rather than as program options. Cell motion (rather than all
+	// motion) keeps drag reporting quiet so text selection still works with the
+	// terminal's own selection modifier.
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// renderFrame builds the complete screen as a string.
+//
+// It is kept separate from View so the rest of the program — selection
+// extraction, layout tests — can work with plain text, and View stays a thin
+// adapter over it.
+func (m *Model) renderFrame() string {
 	if m.width == 0 {
 		return "loading..."
 	}
@@ -26,8 +44,15 @@ func (m *Model) View() string {
 
 	sections := make([]string, 0, len(footer)+2)
 	sections = append(sections, header, m.viewport.View())
-	sections = append(sections, footer...)
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	// Drop whole optional sections until the frame fits. The prompt box grows
+	// with its content, so in a short terminal the fixed parts can exceed the
+	// window; trimming the assembled string instead would cut a box open.
+	sections = append(sections, m.fitFooterSections(footer)...)
+	frame := lipgloss.JoinVertical(lipgloss.Left, sections...)
+	// The selection is painted onto the finished frame so the characters are
+	// never altered — only their styling — and the extracted text matches what
+	// the user sees.
+	return m.highlightSelection(frame)
 }
 
 // renderFooter returns every section below the transcript viewport. Keeping
@@ -143,25 +168,24 @@ func (m *Model) fitViewport(header string, footer []string) {
 		height -= lipgloss.Height(section)
 	}
 	height = max(1, height)
-	if m.viewport.Height == height {
+	if m.viewport.Height() == height {
 		return
 	}
 
 	wasAtBottom := m.viewport.AtBottom()
-	m.viewport.Height = height
+	m.viewport.SetHeight(height)
 	if wasAtBottom {
 		m.viewport.GotoBottom()
 	}
 }
 
 func (m *Model) renderHeader() string {
-	left := headerStyle.Render("◆ mini-opencode")
+	left := headerStyle.Render(m.headerTitle())
 	titleW := lipgloss.Width(left)
 	// Progressively drop header segments as the terminal narrows so the
 	// header never overflows or overlaps itself.
 	gitSeg := m.renderGitSegment()
-	sessionSeg := m.renderSessionSegment()
-	modeSeg := m.renderModeSegment()
+	modeSeg := m.renderModeSegment() + dimStyle.Render(" ["+m.PermissionMode().Label()+"]")
 	versionSeg := dimStyle.Render(fmt.Sprintf("v%s · %s", m.version, m.cfg.Provider.Name))
 	ctxSeg := m.renderContextSegment()
 
@@ -176,17 +200,46 @@ func (m *Model) renderHeader() string {
 		rightW = lipgloss.Width(right)
 	}
 
-	// Budget for left-side segments after reserving the right side.
+	// Budget for left-side segments after reserving the right side. The session
+	// title is the only flexible part: it is shortened to whatever is left
+	// instead of being dropped, because the title is what identifies the
+	// conversation. The fixed segments are kept whole.
 	budget := m.width - titleW - rightW - 2
-	if budget >= lipgloss.Width(gitSeg)+lipgloss.Width(sessionSeg)+lipgloss.Width(modeSeg) {
-		left += gitSeg + sessionSeg + modeSeg
-	} else if budget >= lipgloss.Width(gitSeg)+lipgloss.Width(modeSeg) {
+	fixed := lipgloss.Width(gitSeg) + lipgloss.Width(modeSeg)
+	switch {
+	case budget >= fixed+minSessionTitleWidth:
+		left += gitSeg + m.renderSessionSegment(budget-fixed) + modeSeg
+	case budget >= fixed:
 		left += gitSeg + modeSeg
-	} else if budget >= lipgloss.Width(modeSeg) {
+	case budget >= lipgloss.Width(modeSeg):
 		left += modeSeg
 	}
 	space := max(0, m.width-lipgloss.Width(left)-rightW)
 	return left + strings.Repeat(" ", space) + right
+}
+
+// minSessionTitleWidth is the smallest useful slice of a session title: below
+// this the ellipsis would carry more information than the title itself.
+const minSessionTitleWidth = 8
+
+// headerTitle is the product label, shortened when the terminal is too narrow
+// to hold it.
+//
+// The label is the one segment that is always present, so on a very narrow
+// terminal it must give way itself; otherwise it alone would overflow and wrap
+// the single-row header.
+func (m *Model) headerTitle() string {
+	const full = "◆ mini-opencode"
+	if m.width <= 0 || lipgloss.Width(full) <= m.width {
+		return full
+	}
+	// Fall back to the shortest form that still identifies the program.
+	for _, candidate := range []string{"◆ mini-opencode", "◆ mini", "◆"} {
+		if lipgloss.Width(candidate) <= m.width {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // boxWidth returns the lipgloss Width to pass to a bordered, padded box so
@@ -259,6 +312,11 @@ func (m *Model) renderContextSegment() string {
 }
 
 func (m *Model) renderInputBar() string {
+	// A terminal too short for the border falls back to a single row, so the
+	// box cannot take more rows than exist and push the frame off screen.
+	if !m.borderedInputFits() {
+		return m.promptStyleM().Render("❯ ") + m.input.View()
+	}
 	// border(2) + padding(2) sit on top of Width, so subtract 2 to fit.
 	return m.inputBorderStyle().Width(boxWidth(m)).Render(m.promptStyleM().Render("❯") + " " + m.input.View())
 }
@@ -289,28 +347,43 @@ func (m *Model) renderPermissionPrompt() string {
 
 func (m *Model) renderHelpBar() string {
 	if m.state == stateRunning {
-		return spinnerStyle.Render(m.spinner.View()) + " " + dimStyle.Render("thinking...  esc to interrupt")
+		// Advertise the fold while running: that is when the task panel is most
+		// likely to be in the way.
+		hint := "thinking...  esc to interrupt"
+		if strings.TrimSpace(m.todos) != "" {
+			hint = "thinking...  esc to interrupt · ctrl+t todos"
+		}
+		return spinnerStyle.Render(m.spinner.View()) + " " + dimStyle.Render(hint)
 	}
 	if m.state == stateCompacting {
 		return spinnerStyle.Render(m.spinner.View()) + " " + dimStyle.Render("compacting...  esc to interrupt")
 	}
 	// Adapt the command hint to the available width so it never overflows
 	// or garbles on narrow terminals.
-	full := "/help /version /tools /status /session /newsession /compact /key /name /quit"
-	right := "↑↓ scroll · tab mode"
+	//
+	// The command list is deliberately an abbreviated selection rather than
+	// every slash command: the full list is 76 columns, which leaves no room
+	// for the key hints on a standard 80-column terminal, and the hints are
+	// what users cannot discover any other way (/help lists the commands).
+	full := "/help /tools /status /compact /session /quit"
+	hints := []string{"↑↓ scroll", "shift+enter newline", "tab mode", "ctrl+t todos"}
+	right := strings.Join(hints, " · ")
 	fullW := lipgloss.Width(full)
-	rightW := lipgloss.Width(right)
 	switch {
-	case m.width >= fullW+rightW+2:
-		space := m.width - fullW - rightW
+	case m.width >= fullW+lipgloss.Width(right)+2:
+		space := m.width - fullW - lipgloss.Width(right)
 		return dimStyle.Render(full) + strings.Repeat(" ", space) + dimStyle.Render(right)
-	case m.width >= fullW+2:
-		return dimStyle.Render(full)
-	case m.width >= 26:
-		return dimStyle.Render("/help · /quit · tab mode")
-	default:
-		return dimStyle.Render("/help · /quit")
+	case m.width >= fullW+lipgloss.Width(right)+1:
+		return dimStyle.Render(full) + " " + dimStyle.Render(right)
 	}
+	// Too narrow for both: keep the shortcuts, dropping the least useful first.
+	for i := len(hints); i >= 1; i-- {
+		candidate := strings.Join(hints[:i], " · ")
+		if lipgloss.Width(candidate)+8 <= m.width {
+			return dimStyle.Render("/help · " + candidate)
+		}
+	}
+	return dimStyle.Render("/help")
 }
 
 func (m *Model) renderUserMessage(text string) string {
@@ -322,6 +395,26 @@ func (m *Model) renderUserMessage(text string) string {
 func (m *Model) renderAssistantMessage(text string) string {
 	contentWidth := max(1, m.width-2)
 	rendered := renderAssistantMarkdown(text, max(1, contentWidth-2)) // -2 for the left padding
+	return assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" + assistantText.Width(contentWidth).Render(rendered)
+}
+
+// renderStreamingMessage renders the message currently being streamed, reusing
+// the settled prefix cached on the model.
+//
+// A throttled repaint still has to run Glamour over whatever text it is handed,
+// and that costs ~0.5MB/s (16KB ≈ 30ms on an M2), so without this a long answer
+// stalls the frame no matter how well the deltas are coalesced. Only the
+// trailing, still-growing block is re-rendered here; everything before it is
+// settled and served from the cache. The output is byte-identical to
+// renderAssistantMessage, which markdown_cache_test.go asserts.
+func (m *Model) renderStreamingMessage(text string) string {
+	contentWidth := max(1, m.width-2)
+	mdWidth := max(1, contentWidth-2) // -2 for the left padding
+
+	if m.streamCache == nil {
+		m.streamCache = newMarkdownRenderCache()
+	}
+	rendered := m.streamCache.render(text, mdWidth)
 	return assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" + assistantText.Width(contentWidth).Render(rendered)
 }
 
@@ -412,6 +505,7 @@ func (m *Model) renderTools() string {
 func (m *Model) renderStatus() string {
 	var lines []string
 	lines = append(lines, toolName.Render("status:"))
+	lines = append(lines, fmt.Sprintf("  permissions: %s · %s", m.PermissionMode(), m.PermissionMode().Label()))
 	if m.gitStatus.Available {
 		lines = append(lines, "  "+cmdStyle.Render("git")+"  branch: "+m.gitStatus.Branch)
 		lines = append(lines, fmt.Sprintf("  staged: %d  modified: %d  untracked: %d",
@@ -477,6 +571,7 @@ func (m *Model) renderHelp() string {
 		"  " + cmdStyle.Render("/version") + " show version\n" +
 		"  " + cmdStyle.Render("/tools") + "   list registered tools\n" +
 		"  " + cmdStyle.Render("/status") + "  show git status and context usage\n" +
+		"  " + cmdStyle.Render("/permissions") + "  帮我批准 / 完全访问 / 请求批准\n" +
 		"  " + cmdStyle.Render("/mcp") + "     show MCP server status\n" +
 		"  " + cmdStyle.Render("/init") + "    analyze the repo and write AGENTS.md\n" +
 		"  " + cmdStyle.Render("/fork") + "    branch this conversation into a new session\n" +
@@ -535,7 +630,7 @@ func (m *Model) renderModeSegment() string {
 
 // inputBorderColor returns the border color of the input bar for the current
 // mode.
-func inputBorderColor(plan bool) lipgloss.Color {
+func inputBorderColor(plan bool) color.Color {
 	if plan {
 		return colorBlue
 	}
@@ -673,31 +768,79 @@ func (m *Model) renderMCPStatus() string {
 	return strings.Join(lines, "\n")
 }
 
-// renderTodoPanel renders the agent's task list above the input bar. It is
-// empty when no todo list is active.
+// renderTodoPanel renders the agent's task list above the input bar.
+//
+// The panel is empty when there is no list. It collapses to a single summary
+// line when the user folds it with ctrl+t: the point of folding is to stop the
+// list consuming screen space, not to hide the fact that work is outstanding,
+// so the progress counters stay visible.
 func (m *Model) renderTodoPanel() string {
 	if strings.TrimSpace(m.todos) == "" {
 		return ""
 	}
 	lines := strings.Split(strings.TrimSpace(m.todos), "\n")
+	w := boxWidth(m)
+	inner := max(1, w-4)
+
+	if m.todosCollapsed {
+		return m.renderCollapsedTodoPanel(lines, w, inner)
+	}
+
 	rendered := make([]string, 0, len(lines)+1)
 	rendered = append(rendered, keyLabel.Render("todos:"))
 	for _, line := range lines {
-		style := dimStyle
-		switch {
-		case strings.HasPrefix(line, "[x]"):
-			style = gitCleanStyle
-		case strings.HasPrefix(line, "[>]"):
-			style = permAsk
-		}
-		rendered = append(rendered, style.Render(line))
+		rendered = append(rendered, todoLineStyle(line).Render(line))
 	}
-	w := boxWidth(m)
-	inner := max(1, w-4)
 	for i, line := range rendered {
 		rendered[i] = wordWrap(line, inner)
 	}
 	return commandBox.Width(w).Render(strings.Join(rendered, "\n"))
+}
+
+// renderCollapsedTodoPanel renders the folded form: one line naming the list
+// and how far along it is.
+func (m *Model) renderCollapsedTodoPanel(lines []string, w, inner int) string {
+	done, total, inProgress := todoCounts(lines)
+	summary := fmt.Sprintf("%d/%d done", done, total)
+	if inProgress != "" {
+		summary += " · " + inProgress
+	}
+	line := keyLabel.Render("todos:") + " " + dimStyle.Render(summary) +
+		dimStyle.Render("  (ctrl+t)")
+	return commandBox.Width(w).Render(wordWrap(line, inner))
+}
+
+// todoCounts reads progress back off a rendered checklist. The trailing
+// "(n/m done)" summary line is a count, not an entry, so it is skipped.
+func todoCounts(lines []string) (done, total int, inProgress string) {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "(") {
+			continue
+		}
+		total++
+		switch {
+		case strings.HasPrefix(trimmed, "[x]"):
+			done++
+		case strings.HasPrefix(trimmed, "[>]"):
+			if inProgress == "" {
+				inProgress = strings.TrimSpace(strings.TrimPrefix(trimmed, "[>]"))
+			}
+		}
+	}
+	return done, total, inProgress
+}
+
+// todoLineStyle picks the style for one rendered checklist entry.
+func todoLineStyle(line string) lipgloss.Style {
+	switch {
+	case strings.HasPrefix(line, "[x]"):
+		return gitCleanStyle
+	case strings.HasPrefix(line, "[>]"):
+		return permAsk
+	default:
+		return dimStyle
+	}
 }
 
 // todoTextFromJSON renders a stored todo list, returning "" when empty.
@@ -764,4 +907,49 @@ func indentLines(text, prefix string) string {
 		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// fitFooterSections returns the footer sections that fit in the terminal,
+// dropping the least important whole sections first.
+//
+// The prompt box and the transcript are never dropped: they are what the user
+// is interacting with. The help bar goes first, then the task panel.
+func (m *Model) fitFooterSections(footer []string) []string {
+	if m.height <= 0 || len(footer) == 0 {
+		return footer
+	}
+	used := lipgloss.Height(m.renderHeader()) + m.viewport.Height()
+	kept := make([]string, 0, len(footer))
+	for i, section := range footer {
+		h := lipgloss.Height(section)
+		if used+h <= m.height {
+			kept = append(kept, section)
+			used += h
+			continue
+		}
+		// Out of room. The last section is the help bar and the one before the
+		// input bar is the task panel; both are droppable. The input bar itself
+		// is kept even if it overflows, because losing it means losing typing.
+		if m.isDroppableFooterSection(footer, i) {
+			continue
+		}
+		kept = append(kept, section)
+		used += h
+	}
+	return kept
+}
+
+// isDroppableFooterSection reports whether a footer section may be omitted when
+// the frame does not fit.
+func (m *Model) isDroppableFooterSection(footer []string, index int) bool {
+	// The help bar is always last.
+	if index == len(footer)-1 {
+		return true
+	}
+	// The task panel sits immediately above the input bar when present.
+	if index == len(footer)-2 && strings.TrimSpace(m.todos) != "" {
+		panel := m.renderTodoPanel()
+		return panel != "" && footer[index] == panel
+	}
+	return false
 }

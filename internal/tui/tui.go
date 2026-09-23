@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/agent/tools"
@@ -103,7 +104,7 @@ type RuntimeFactory func(cfg config.Config) (*agent.Runtime, error)
 
 type Model struct {
 	viewport viewport.Model
-	input    textinput.Model
+	input    textarea.Model
 	spinner  spinner.Model
 	keyInput textinput.Model
 
@@ -125,6 +126,11 @@ type Model struct {
 	// assistant message; -1 when not streaming.
 	streamingIdx  int
 	streamingText string
+	// streamCache memoizes the rendered form of the settled blocks of the
+	// message being streamed, so a throttled repaint only re-runs Glamour over
+	// the unsettled tail instead of the whole accumulated answer. It is reset
+	// whenever the streamed text no longer extends the previous frame's text.
+	streamCache *markdownRenderCache
 
 	gitStatus GitStatus
 
@@ -140,6 +146,22 @@ type Model struct {
 	planHook *agent.PlanModeHook
 	// todos is the rendered task list shown above the input bar.
 	todos string
+	// todosCollapsed folds the panel to a one-line summary. It is a view
+	// preference toggled with ctrl+t; it survives the list being rewritten
+	// within a run and resets when the list is cleared.
+	todosCollapsed bool
+	// selection is the current mouse text selection; see selection.go.
+	selection selection
+	// supportsShiftEnter records whether the terminal can distinguish modified
+	// keys (kitty keyboard protocol). Shift+Enter only arrives as itself when
+	// it can; otherwise the fallback newline keys are the only option.
+	supportsShiftEnter bool
+	// clipboard receives copied text. Nil means pbcopy.
+	clipboard ClipboardWriter
+	// selectionHighlighted reports whether the last rendered frame actually
+	// painted a selection. Styling is stripped on non-TTY output, so escape
+	// codes cannot be used to tell whether highlighting happened.
+	selectionHighlighted bool
 
 	// mcpStatus reports the MCP server states for the /mcp command.
 	mcpStatus func() []string
@@ -164,12 +186,17 @@ type Model struct {
 	// and markBlocksChanged. Refreshing when it is false is a cheap no-op,
 	// which matters because View() runs on every spinner tick.
 	transcriptDirty bool
+	// viewportRebuildBytes counts the bytes pushed into the viewport. Tests use
+	// it to prove an append does not rebuild the whole transcript.
+	viewportRebuildBytes int
 	// footerDirty marks the memoized footer sections stale; see renderFooter
 	// in render.go. It defaults to true so the first render builds them.
 	cachedFooter []string
 	footerDirty  bool
 
 	pendingPerm *permissionRequestMsg
+	// permissionMode is a process-local override, separate from saved config.
+	permissionMode agent.PermissionMode
 	// sessionAllowed holds tool names the user approved for the whole session
 	// ("always allow"), so repeated prompts for the same tool stop appearing.
 	sessionAllowed map[string]bool
@@ -197,12 +224,25 @@ type Model struct {
 type Compactor func(ctx context.Context) (agent.CompactResult, error)
 
 func New(cfg *config.Config, workingDir, ver string) *Model {
-	vp := viewport.New(80, 20)
+	if cfg == nil {
+		defaults := config.Default()
+		cfg = &defaults
+	}
+	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 
-	ti := textinput.New()
+	ti := textarea.New()
 	ti.Placeholder = "ask anything...  (/help for commands)"
 	ti.Prompt = ""
 	ti.CharLimit = 0
+	ti.ShowLineNumbers = false
+	// The prompt box draws its own border and caret, so every default textarea
+	// style that paints a background must be cleared: CursorLine and
+	// EndOfBuffer fill the caret's whole row, which shows up as a light bar
+	// across the box (their defaults are Background(255), i.e. white).
+	ti.SetStyles(promptTextareaStyles())
+	// The input is a prompt box, not a document editor: Enter sends, so the
+	// newline key is Ctrl+J / Alt+Enter (see handleKey).
+	ti.SetHeight(1)
 	ti.Focus()
 
 	sp := spinner.New()
@@ -225,13 +265,14 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 		transcriptDirty: true,
 		// The footer has never been built, so the first render must not take
 		// the cached (nil) path.
-		footerDirty:  true,
-		streamingIdx: -1,
-		cfg:          cfg,
-		workingDir:   workingDir,
-		version:      ver,
-		mode:         ModeCode,
-		terminal:     detectTerminalProfile(),
+		footerDirty:    true,
+		streamingIdx:   -1,
+		cfg:            cfg,
+		permissionMode: cfg.Permissions.Mode,
+		workingDir:     workingDir,
+		version:        ver,
+		mode:           ModeCode,
+		terminal:       detectTerminalProfile(),
 	}
 }
 
@@ -444,15 +485,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// alternate screen and expose rows from the previous conversation.
 		m.width = max(1, msg.Width-1)
 		m.height = msg.Height
-		m.viewport.Width = m.width
-		m.viewport.Height = max(1, msg.Height-5)
+		m.viewport.SetWidth(m.width)
+		m.viewport.SetHeight(max(1, msg.Height-5))
 		// Reserve the common header + input box + help bar layout. View()
 		// recalculates this from the actual footer for menus and prompts.
 		// Constrain the textinput so typed text stays within the bordered
 		// input bar (border 2 + padding 2 + prompt glyph 2 = 6).
-		m.input.Width = max(1, m.width-6)
-		m.keyInput.Width = max(1, m.width-6)
+		m.input.SetWidth(max(1, m.width-6))
+		// Wrapping depends on the width, so the visible height has to be
+		// recomputed whenever the terminal is resized.
+		m.syncInputHeight()
+		m.keyInput.SetWidth(max(1, m.width-6))
 		m.refreshViewport()
+		return m, nil
+
+	case tea.KeyboardEnhancementsMsg:
+		// The terminal reports whether it can disambiguate modified keys, which
+		// is what makes Shift+Enter distinguishable from Enter. Recorded so the
+		// help bar can advertise the key the terminal actually supports.
+		m.supportsShiftEnter = msg.SupportsKeyDisambiguation()
+		m.invalidateFooter()
 		return m, nil
 
 	case spinner.TickMsg:
@@ -577,6 +629,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markBlocksChanged()
 			m.streamingIdx = -1
 			m.streamingText = ""
+			m.streamCache = nil
 			m.todos = m.todosForSession(msg.sess.ID)
 			m.addBlock(dimStyle.Render("session: " + msg.sess.Title))
 			m.renderHistoryIntoBlocks(msg.sess.Messages)
@@ -625,8 +678,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── helpers ───────────────────────────────────────────
 
 func (m *Model) addBlock(block string) {
-	m.blocks = append(m.blocks, block)
-	m.transcriptDirty = true
+	m.appendBlock(block)
 }
 
 // markBlocksChanged records that a block was edited in place, so the cached
@@ -636,34 +688,64 @@ func (m *Model) markBlocksChanged() {
 	m.transcriptDirty = true
 }
 
-// viewportTailBlocks bounds how many trailing blocks are handed to the
-// viewport. The transcript is append-only and the viewport can only ever show
-// the last screenful, so joining the entire history on every frame grew
-// linearly with the conversation and showed up as stutter late in a long task.
-// Keeping a generous tail preserves scrollback in practice while making the
-// per-frame cost independent of how long the session has run.
+// appendBlock adds a block and pushes only that block into the viewport.
+//
+// Appending is by far the most common update (every tool call, every streamed
+// repaint), and viewport.SetContent is O(total characters): it normalizes line
+// endings, splits the whole transcript into lines and scans for the longest
+// line. Rebuilding on every append made a tool-heavy turn stutter, so the
+// common case now extends the viewport content in place and the full rebuild is
+// reserved for edits that actually invalidate it.
+func (m *Model) appendBlock(block string) {
+	m.blocks = append(m.blocks, block)
+	m.transcriptDirty = true
+}
+
+// transcriptWindowBlocks is how many trailing blocks the viewport holds.
+//
+// viewport.SetContent is O(total characters): it normalizes line endings, splits
+// the text into lines and scans for the longest line. Handing it the whole
+// transcript made every appended block cost more as the conversation grew,
+// which is what stuttered while tools ran. The viewport can only display one
+// screenful, so it is given a bounded tail: enough to scroll back through
+// recent output, at a cost independent of how long the session has run.
+const transcriptWindowBlocks = 60
+
+// viewportTailBlocks bounds how many blocks the transcript keeps available at
+// all; older blocks are dropped from rendering but remain in memory.
 const viewportTailBlocks = 400
 
-// refreshViewport rebuilds the viewport content and pins it to the bottom.
+// refreshViewport brings the viewport up to date, and follows new content to the
+// bottom only when the user is already there.
 //
-// The join is skipped when nothing changed, because View() runs on every
-// message — including every spinner tick — and the transcript usually has not
-// moved between frames.
+// Forcing GotoBottom unconditionally yanked the view back down while the user
+// was scrolling up to read history during a run, which made the transcript
+// impossible to read while the agent was still producing output. Following is
+// now conditional, so the view stays put once the user scrolls away and resumes
+// following as soon as they scroll back to the bottom.
 func (m *Model) refreshViewport() {
-	if !m.transcriptDirty {
-		m.viewport.GotoBottom()
-		return
+	follow := m.viewport.AtBottom()
+	if m.transcriptDirty {
+		m.rebuildViewport()
 	}
+	if follow {
+		m.viewport.GotoBottom()
+	}
+}
+
+// rebuildViewport re-derives the viewport content from the trailing window.
+func (m *Model) rebuildViewport() {
 	m.transcriptDirty = false
-	m.viewport.SetContent(m.transcriptContent())
-	m.viewport.GotoBottom()
+	content := m.transcriptContent()
+	m.viewportRebuildBytes += len(content)
+	m.viewport.SetContent(content)
 }
 
 // transcriptContent joins the rendered blocks, capped to the trailing window.
 func (m *Model) transcriptContent() string {
 	blocks := m.blocks
-	if len(blocks) > viewportTailBlocks {
-		blocks = blocks[len(blocks)-viewportTailBlocks:]
+	if len(blocks) > transcriptWindowBlocks {
+		blocks = blocks[len(blocks)-transcriptWindowBlocks:]
 	}
 	if len(blocks) == 1 {
 		return blocks[0]

@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/lipgloss/v2"
+)
 
 // Crush-inspired palette: dark substrate, violet accent, cyan user, green results.
 var (
@@ -83,7 +86,34 @@ var (
 
 // Context usage styles, color-coded by usage tier.
 var (
-	ctxLowStyle  = lipgloss.NewStyle().Foreground(colorGreen)
-	ctxMidStyle  = lipgloss.NewStyle().Foreground(colorYellow)
-	ctxHighStyle = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	ctxLowStyle = lipgloss.NewStyle().Foreground(colorGreen)
+	// selectionStyle paints a mouse selection. It reverses the colours rather
+	// than adding a background so it reads as a selection in any theme.
+	selectionStyle = lipgloss.NewStyle().Reverse(true)
+	ctxMidStyle    = lipgloss.NewStyle().Foreground(colorYellow)
+	ctxHighStyle   = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
 )
+
+// promptTextareaStyles returns the textarea styles for the prompt box.
+//
+// The box supplies its own border, caret and placeholder colours, so the
+// textarea's defaults must be cleared of every background: CursorLine and
+// EndOfBuffer paint the caret's whole row, and their light defaults render as a
+// white bar across the input box. Reverse video is used for the caret instead,
+// which stays visible on any terminal theme without introducing a background.
+func promptTextareaStyles() textarea.Styles {
+	var styles textarea.Styles
+	states := []*textarea.StyleState{&styles.Focused, &styles.Blurred}
+	for _, state := range states {
+		state.Base = lipgloss.NewStyle()
+		state.Text = lipgloss.NewStyle().Foreground(colorFg)
+		state.CursorLine = lipgloss.NewStyle()
+		state.EndOfBuffer = lipgloss.NewStyle()
+		state.LineNumber = lipgloss.NewStyle()
+		state.CursorLineNumber = lipgloss.NewStyle()
+		state.Prompt = lipgloss.NewStyle()
+		state.Placeholder = lipgloss.NewStyle().Foreground(colorDim)
+	}
+	styles.Cursor = textarea.CursorStyle{Blink: true}
+	return styles
+}

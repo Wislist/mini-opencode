@@ -24,6 +24,7 @@ var commandList = []CommandItem{
 	{"/plan", "toggle plan mode (read-only analysis)"},
 	{"/undo", "restore the newest file snapshot"},
 	{"/status", "show git status and context usage"},
+	{"/permissions", "权限：帮我批准 / 完全访问 / 请求批准"},
 	{"/session", "list and switch to a saved conversation"},
 	{"/newsession", "start a new conversation"},
 	{"/archive", "archive current conversation to JSON"},

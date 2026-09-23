@@ -20,6 +20,7 @@ type Runtime struct {
 	tools        *ToolRegistry
 	toolService  ToolService
 	confirmer    PermissionConfirmer
+	permissions  *ModePermissionPolicy
 	messages     []Message
 	maxTurns     int
 	hooks        HookChain
@@ -358,7 +359,20 @@ func WithToolService(service ToolService) RuntimeOption {
 func WithPermissionPolicy(policy PermissionPolicy) RuntimeOption {
 	return func(r *Runtime) {
 		r.tools.SetPermissionPolicy(policy)
+		r.permissions, _ = policy.(*ModePermissionPolicy)
 	}
+}
+
+// SetPermissionMode is called at idle UI/CLI boundaries. It does not revoke
+// already-running background jobs or replace the policy used by the tools.
+func (r *Runtime) SetPermissionMode(mode PermissionMode) error {
+	r.mu.Lock()
+	policy := r.permissions
+	r.mu.Unlock()
+	if policy == nil {
+		return fmt.Errorf("runtime does not support permission mode switching")
+	}
+	return policy.SetMode(mode)
 }
 
 func WithPermissionConfirmer(confirmer PermissionConfirmer) RuntimeOption {

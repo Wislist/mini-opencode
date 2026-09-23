@@ -9,8 +9,10 @@ import (
 )
 
 type FileOptions struct {
-	WorkDir         string
-	AllowedRoots    []string
+	WorkDir      string
+	AllowedRoots []string
+	// FullAccess is read at each call so downgrading restores the boundary.
+	FullAccess      func() bool
 	InstructionData InstructionData
 	// Observer records reads and pre-modification snapshots. Optional.
 	Observer FileObserver
@@ -98,6 +100,9 @@ func resolveWorkspacePathRoots(workDir string, allowedRoots []string, path strin
 // resolveWorkspacePathWithOptions resolves a path using a FileOptions'
 // working directory and allowed roots.
 func resolveWorkspacePathWithOptions(options FileOptions, path string) (string, error) {
+	if options.FullAccess != nil && options.FullAccess() {
+		return resolveWorkspacePathRoots(options.WorkDir, []string{"/"}, path)
+	}
 	return resolveWorkspacePathRoots(options.WorkDir, options.AllowedRoots, path)
 }
 

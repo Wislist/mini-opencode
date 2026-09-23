@@ -3,7 +3,7 @@ package tui
 import (
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // streamRenderInterval is the minimum gap between Markdown renders of the block
@@ -49,7 +49,7 @@ func (m *Model) flushStreamRender() {
 	if m.streamingText == "" {
 		return
 	}
-	rendered := m.renderAssistantMessage(m.streamingText)
+	rendered := m.renderStreamingMessage(m.streamingText)
 	if m.streamingIdx < 0 {
 		m.addBlock(rendered)
 		m.streamingIdx = len(m.blocks) - 1

@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/wislist/mini-opencode/internal/agent"
 )
@@ -53,6 +52,8 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		m.addBlock(m.renderStatus())
 		m.refreshViewport()
 		return m, nil
+	case input == "/permissions" || strings.HasPrefix(input, "/permissions "):
+		return m.handlePermissions(input)
 	case input == "/key":
 		m.state = stateKeyPrompt
 		m.keyInput.Reset()
@@ -96,6 +97,7 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
 	m.state = stateRunning
 	m.input.Blur()
+	m.startNewTurn(input)
 
 	sendText := input
 	if m.mode == ModePlan {
@@ -115,7 +117,7 @@ func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
 		m.program.Send(runtimeDoneMsg{err: err})
 	}()
 
-	return m, spinner.Tick
+	return m, m.spinner.Tick
 }
 
 // startDistill extracts durable memories from the conversation that just
@@ -314,7 +316,7 @@ func (m *Model) startCompact() (tea.Model, tea.Cmd) {
 		m.program.Send(compactDoneMsg{before: before, userSummary: result.UserSummary, err: err})
 	}()
 
-	return m, spinner.Tick
+	return m, m.spinner.Tick
 }
 
 // handleRuntimeEvent applies one runtime event to the model. It returns a
@@ -347,8 +349,12 @@ func (m *Model) handleRuntimeEvent(event agent.Event) tea.Cmd {
 			// If we were streaming, replace the in-progress block with the
 			// authoritative final content. Otherwise (tool-only response with
 			// no content deltas) add a fresh block.
+			//
+			// The cached renderer is used here too: the final content extends
+			// what the last throttled frame rendered, so its settled prefix is
+			// still valid and only the tail needs a fresh Glamour pass.
 			if wasStreaming {
-				m.blocks[m.streamingIdx] = m.renderAssistantMessage(event.Message.Content)
+				m.blocks[m.streamingIdx] = m.renderStreamingMessage(event.Message.Content)
 				m.markBlocksChanged()
 			} else {
 				m.addBlock(m.renderAssistantMessage(event.Message.Content))
@@ -356,6 +362,9 @@ func (m *Model) handleRuntimeEvent(event agent.Event) tea.Cmd {
 		}
 		m.streamingIdx = -1
 		m.streamingText = ""
+		// The stream is over: drop the prefix cache so the next message starts
+		// clean and cannot reuse a block from this one.
+		m.streamCache = nil
 		m.saveCurrentSession()
 	case agent.EventToolCallStarted:
 		if event.ToolCall != nil {

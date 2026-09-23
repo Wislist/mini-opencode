@@ -4,7 +4,7 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Scroll behavior is tuned per terminal. macOS terminals disagree on how they
@@ -77,24 +77,31 @@ func (m *Model) scrollLines(n int) {
 		return
 	}
 	if n > 0 {
-		m.viewport.LineDown(n)
+		m.viewport.ScrollDown(n)
 		return
 	}
-	m.viewport.LineUp(-n)
+	m.viewport.ScrollUp(-n)
 }
 
 // handleMouse scrolls the transcript for wheel events and ignores every other
 // mouse action so text selection and clicks keep their default terminal
 // behavior.
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action != tea.MouseActionPress {
+	// Bubble Tea v2 delivers each mouse phase as its own message type, so the
+	// selection handler is driven from the concrete events rather than from an
+	// action field.
+	if m.handleSelectionMouse(msg) {
 		return m, nil
 	}
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		m.scrollLines(-m.terminal.wheelLines)
-	case tea.MouseButtonWheelDown:
-		m.scrollLines(m.terminal.wheelLines)
+	switch msg.(type) {
+	case tea.MouseWheelMsg:
+		wheel := msg.(tea.MouseWheelMsg)
+		switch wheel.Button {
+		case tea.MouseWheelUp:
+			m.scrollLines(-m.terminal.wheelLines)
+		case tea.MouseWheelDown:
+			m.scrollLines(m.terminal.wheelLines)
+		}
 	}
 	return m, nil
 }

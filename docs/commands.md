@@ -9,6 +9,7 @@ is not a terminal (`app.Run`); the TUI is used otherwise (`app.RunTUI`).
 | `/version` | ✅ | ✅ | Print the version. |
 | `/tools` | ✅ | ✅ | List the registered tools (including MCP tools). |
 | `/workspace` | ✅ | ✅ | Show the working directory and `workspace.allowed_roots`. |
+| `/permissions [ask\|auto-review\|full-access [confirm]]` | ✅ | ✅ | 查看或切换权限模式；完全访问必须显式确认。 |
 | `/status` | ✅ | ✅ | Workspace, git branch, mode, provider, session, context estimate (split into system prompt vs conversation), provider-reported tokens, session-approved tools, todo list. |
 | `/skills` | ✅ | — | List installed skills and curated names. |
 | `/mcp` | ✅ | ✅ | Per-server MCP status: disabled, running (tool count), or the startup error. |
@@ -37,7 +38,103 @@ command menu (or is passed through to the input field). `esc` keeps its other
 meanings: deny a permission request, reject a submitted plan, and close the
 session picker.
 
+## Keyboard shortcuts (TUI)
+
+| Key | Effect |
+| --- | --- |
+| `tab` | Toggle plan mode (or accept the highlighted slash-command completion). |
+| `ctrl+t` | Fold or unfold the pinned task panel. Works while a run is in progress. |
+| `shift+enter` | Insert a newline in the prompt box. |
+| `ctrl+j` / `alt+enter` | Insert a newline too; fallbacks for terminals without the kitty keyboard protocol. |
+| `enter` | Send the message. |
+| `↑` `↓` / wheel | Scroll the transcript. |
+| drag (left button) | Select text; releasing copies it to the system clipboard. |
+| click (no drag) | Clear the selection. |
+| `esc` | Interrupt a run; otherwise deny a prompt, reject a plan, or close the picker. |
+| `ctrl+c` | Quit when idle, interrupt when running. |
+
+### Multiline input
+
+The prompt box grows with its content, up to six lines, and wraps long lines
+automatically. `enter` sends; `ctrl+j` and `alt+enter` insert a newline.
+
+`shift+enter` inserts a newline, which requires the terminal to disambiguate
+modified keys. Bubble Tea v2 negotiates the kitty keyboard protocol for this and
+reports the result as `KeyboardEnhancementsMsg`; when the terminal supports it,
+`shift+enter` arrives as its own key. On terminals that do not, the protocol is
+unavailable and `ctrl+j` (LF) and `alt+enter` (ESC CR) remain — they are distinct
+bytes that work regardless, so a newline is always reachable.
+
+The upgrade to Bubble Tea v2 was required for this: v1's key type had no shift
+field at all, so `shift+enter` and `enter` were literally the same value.
+
+### Selecting and copying text
+
+Enabling mouse reporting (so the wheel arrives as exact events instead of being
+translated by the terminal) takes drag-to-select away from the terminal, so
+selection is implemented in the program: drag with the left button over the
+transcript or the input box, and the selected text is copied to the system
+clipboard on release via `pbcopy`.
+
+The extracted text is taken from the rendered frame, so it is what you actually
+see — no ANSI escapes, no box borders, no trailing padding. A click without a
+drag clears the selection instead of copying one character, and the selection is
+also cleared on `esc` and when you send a message.
+
+### The task panel
+
+The panel is **scoped to one turn**. It is cleared when you send the next
+message, so a list that finished, was abandoned, or was interrupted with `esc`
+does not stay pinned above the input for the rest of the conversation. The store
+is cleared at the same time, so switching conversations cannot resurrect it.
+
+`ctrl+t` folds it down to a single summary line:
+
+```
+expanded                              folded
+╭──────────────────────────╮          ╭──────────────────────────╮
+│ todos:                   │          │ todos: 2/5 done · task 3 │
+│ [x] a                    │   ctrl+t │              (ctrl+t)    │
+│ [>] task 3               │  ──────▶ ╰──────────────────────────╯
+│ [ ] d                    │
+│ (2/5 done)               │  ◀──────
+╰──────────────────────────╯   ctrl+t
+```
+
+Folding keeps the progress counters visible rather than hiding the panel
+entirely: the point is to stop it consuming screen space, not to hide that work
+is outstanding. The fold state survives the agent rewriting the list. The toggle
+writes nothing into the transcript — the panel is pinned chrome, and the fold
+state is already legible from the panel itself. `ctrl+t` appears in the help bar
+(and in the running footer) whenever a list exists, so the key stays
+discoverable.
+
 ## Permission answers
+
+### Modes
+
+- `ask`（请求批准，默认）：沿用现有策略；超出允许根目录、命中旧命令黑名单直接拒绝，
+  `Dangerous` / `RequiresConfirmation` 工具请求人工审批；只读工具照常免审批。
+- `auto-review`（帮我批准）：在默认策略之上，用保守本地规则批准工作区 / allowed roots 内的
+  `write`、`edit`，以及精确的 `pwd`、`/bin/pwd`、`/bin/ls`。不接受额外参数、命令拼接、重定向、
+  命令替换、项目脚本或 Git 配置执行；显式后台运行仍需审批。无法判定的需审批操作仍提示用户。不是独立模型审核器。
+- `full-access`（完全访问）：主 agent 的文件工具可访问当前账户有权限的任意路径，
+  跳过逐次审批和旧命令黑名单。SafetyHook / PlanModeHook / LoopGuardHook、先读后写保持有效。
+  普通 `git push` 不再受旧黑名单阻止，但强推、硬重置等仍由 SafetyHook 阻止。
+
+`/permissions` 显示三种选项。`/permissions full-access` 只显示警告；必须再输入
+`/permissions full-access confirm` 才启用。其余模式直接切换。重复选择当前模式是无副作用操作，
+未知值、错误参数不会改变模式。切换仅限前台空闲时，成功切换会清空旧的 always-allow 工具授权。
+
+模式在本进程内跨会话、配置密钥后的 runtime 重建保持，不写回配置，退出后恢复
+`config.json` 中的 `permissions.mode`（缺省 `ask`）。显式配置 `full-access` 表示用户已同意在启动时启用。
+`/status` 报告模式；TUI 顶栏空间不足时省略徽标，完整信息仍可用命令查看。
+
+**无操作系统级沙箱**：shell 启动文件、shell 内的路径访问和网络连接不受系统级隔离。
+Web 工具沿用只读免审批；MCP 按声明的行为标志审批；`task` 子 agent 仍是原工作区内的只读工具集。
+降级权限只影响后续调用，不杀死已经运行的后台任务（需要时先用 `job_kill` 停止）。
+
+### Manual answers
 
 When a tool needs approval the prompt accepts:
 

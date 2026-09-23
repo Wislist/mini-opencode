@@ -1,5 +1,16 @@
 # Tools
 
+## Permission modes
+
+`permissions.mode` (`ask` / `auto-review` / `full-access`) and `/permissions`
+control application-level approval. See [commands.md](commands.md#modes) for the full contract.
+The shared, mutex-protected mode policy is used by CLI and TUI; file tools and
+`bash` consult the same policy on each call, so downgrading restores path and
+legacy-command checks without rebuilding tools. Full access allows absolute
+and working-directory-relative paths outside allowed roots. It does not disable
+read-before-write, snapshots, plan approval or safety hooks. It is not an OS
+sandbox and cannot constrain arbitrary shell code or an external MCP server.
+
 `internal/agent/tools` contains the coding tool set. The CLI and TUI register
 these plus any tools advertised by configured MCP servers; `/tools` lists the
 result.

@@ -27,9 +27,10 @@
 - 工具集：bash/read/write/edit/ls/glob/grep/job_output/job_kill/todo_write/todo_blocked/exit_plan_mode/task/web_fetch/web_search/install_skill/memory
 - 文件观察：read-before-write + 改动前快照 + `/undo`
 - 并发：只读工具同一批次并发执行，写操作串行；runtime 状态加锁，`go test -race ./...` 通过
-- 权限：deny/confirm 策略、会话级 always-allow、写操作 diff 预览
+- 权限：请求批准 / 帮我批准 / 完全访问三种模式、会话级 always-allow、写操作 diff 预览
 - Plan 模式闭环：只读约束 + `exit_plan_mode` 提交 + 审批后继续实现
 - todo 执行链：列表未完成的项由 runtime 自动续跑，阻塞由 agent 通过 `todo_blocked` 自行判定
+- todo 面板：只在有未完成项时显示（完成后自动消失），`ctrl+t` 手动显隐，窄/矮终端下自动收缩不溢出
 - run 级重试：整轮 provider 失败自动重试，transcript 不丢、工具不重复执行
 - 上下文压缩：按剩余余量触发（crush 式阈值）；**非破坏性**——摘要追加并标记，原文保留在
   内存与 SQLite，只在发给 provider 时截断；压缩时把 todo 列表并入总结指令
@@ -93,7 +94,33 @@ go run ./cmd/mini-opencode   # 也可以直接跑，版本号用源码兜底值
 
 ## Workspace 访问范围
 
-默认情况下 agent 只能读写它启动时所在的工作目录。如果从子目录启动又需要访问整个项目，可以在 `config.json` 里配置 `workspace.allowed_roots`：
+### 权限模式
+
+CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时）和 `/status` 显示当前模式：
+
+| 命令 | 模式 | 行为 |
+| --- | --- | --- |
+| `/permissions ask` | 请求批准（默认） | 保留现有 deny/confirm 策略；危险工具弹出人工审批。 |
+| `/permissions auto-review` | 帮我批准 | 保守本地规则自动批准范围内的 `write`/`edit`，及精确命令 `pwd`、`/bin/pwd`、`/bin/ls`；其他需审批工具仍交给用户。不是模型审核器。 |
+| `/permissions full-access confirm` | 完全访问 | 解除主 agent 文件工具的工作区限制、跳过逐次审批及旧命令黑名单；仍受安全 Hook、plan 模式、先读后写与系统账户权限约束。 |
+
+只输入 `/permissions full-access` 会显示风险提示，不会启用。模式切换仅对本次进程有效，
+清除已有工具 always-allow 授权，不清空对话；不允许在前台 run 中切换，也不会终止已启动的后台进程。
+`/name`、`/key` 保存设置不会意外持久化临时权限模式。启动默认值可显式写入配置：
+
+```json
+{ "permissions": { "mode": "ask" } }
+```
+
+未知模式会报错，未配置时使用 `ask`。显式配置 `full-access` 表示已同意在启动时启用，不再二次提示。
+
+**这些是应用层审批机制，不是操作系统沙箱。** `bash -lc` 包括 shell 启动文件会以当前账户权限运行；
+命令字符串里的路径和网络行为没有系统级隔离。Web 工具沿用只读免审批行为，MCP 依据其工具行为声明审批；
+只读 `task` 子 agent 仍限制在原工作区与 allowed roots 内。不要将模式名称理解为与 Codex 安全能力完全等价。
+
+### 配置文件工具的允许目录
+
+默认情况下内置文件工具只能读写启动时所在的工作目录（完全访问模式除外）。如果从子目录启动又需要访问整个项目，可以在 `config.json` 里配置 `workspace.allowed_roots`：
 
 ```json
 {

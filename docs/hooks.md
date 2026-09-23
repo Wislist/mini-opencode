@@ -2,6 +2,11 @@
 
 Hooks intercept the runtime lifecycle to guard against dangerous agent behavior and wasted tokens. They are a runtime-level layer that fires *before* the permission policy, so a hook can hard-veto a call that would otherwise be allowed or merely prompt for confirmation.
 
+All three permission modes (`ask`, `auto-review`, `full-access`) retain these
+hooks in both CLI and TUI. Full access bypasses approval and legacy command
+blacklists, not a hook's denial or stop. Plan mode remains read-only even when
+full access is selected. See [permission modes](commands.md#modes).
+
 ## Lifecycle
 
 `Hook` implements three points:

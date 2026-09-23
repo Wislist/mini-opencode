@@ -1,12 +1,13 @@
 package tui
 
 import (
+	"charm.land/lipgloss/v2"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/session"
@@ -39,18 +40,18 @@ type sessionSwitchedMsg struct {
 
 // handleSessionListKey processes key events in the session-picker overlay.
 func (m *Model) handleSessionListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyUp, tea.KeyShiftTab:
+	switch msg.String() {
+	case "up", "shift+tab":
 		if m.sessionCursor > 0 {
 			m.sessionCursor--
 		}
 		m.refreshViewport()
-	case tea.KeyDown, tea.KeyTab:
+	case "down", "tab":
 		if m.sessionCursor < len(m.sessionList)-1 {
 			m.sessionCursor++
 		}
 		m.refreshViewport()
-	case tea.KeyEnter:
+	case "enter":
 		if len(m.sessionList) == 0 {
 			m.state = stateIdle
 			m.refreshViewport()
@@ -58,7 +59,7 @@ func (m *Model) handleSessionListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		id := m.sessionList[m.sessionCursor].ID
 		return m, m.switchSessionCmd(id)
-	case tea.KeyEsc, tea.KeyCtrlC:
+	case "esc", "ctrl+c":
 		m.state = stateIdle
 		m.refreshViewport()
 		return m, textinput.Blink
@@ -212,6 +213,32 @@ func (m *Model) saveCurrentSession() {
 	_ = m.saveCurrentSessionErr()
 }
 
+// startNewTurn clears the previous turn's task list before a new user message
+// begins a run.
+//
+// A task list belongs to the turn that created it. Leaving it on screen after
+// that turn ended meant a finished, abandoned or esc-interrupted list stayed
+// pinned above the input for the rest of the conversation, which reads as work
+// still in flight when the agent has long since moved on. Clearing on the turn
+// boundary — rather than on completion — also covers the interrupted case,
+// where the list still holds [>]/[ ] entries that will never be finished.
+//
+// The store is cleared too, so switching conversations cannot resurrect it.
+func (m *Model) startNewTurn(_ string) {
+	m.todos = ""
+	m.todosCollapsed = false
+	// A new turn means a new assistant message, so the streaming render cache
+	// from the previous message must not survive into it.
+	m.streamCache = nil
+	// Sending a message is a fresh start; a leftover selection highlight would
+	// be stale once the transcript scrolls.
+	m.clearSelection()
+	m.invalidateFooter()
+	if m.sessions != nil && m.currentSession != nil {
+		_ = m.sessions.SaveTodos(m.currentSession.ID, "[]")
+	}
+}
+
 func (m *Model) saveCurrentSessionErr() error {
 	m.cancelPendingSessionFlush()
 	if m.sessions == nil || m.currentSession == nil || m.runtime == nil {
@@ -330,12 +357,62 @@ func (m *Model) renderHistoryIntoBlocks(messages []agent.Message) {
 	}
 }
 
-// renderSessionSegment renders the current session title for the header.
-func (m *Model) renderSessionSegment() string {
-	if m.currentSession == nil {
+// renderSessionSegment renders the current session title for the header,
+// truncated to fit the given cell budget.
+//
+// The budget matters because the header is a single row: shortening the title
+// is always better than dropping it, so the caller passes the space it has left
+// rather than a fixed maximum.
+func (m *Model) renderSessionSegment(budget int) string {
+	if m.currentSession == nil || budget <= 0 {
 		return ""
 	}
-	return sessionStyle.Render(" " + truncateTitle(m.currentSession.Title, 30))
+	// The budget is in terminal cells, but the title can contain double-width
+	// runes (CJK), so it is trimmed by measured width rather than by rune
+	// count -- truncating by runes let a CJK title overflow by nearly 2x.
+	const chrome = 2 // leading space + ellipsis
+	limit := budget - chrome
+	if limit < 1 {
+		return ""
+	}
+	title := truncateTitleToWidth(m.currentSession.Title, limit)
+	if title == "" {
+		return ""
+	}
+	rendered := sessionStyle.Render(" " + title)
+	if lipgloss.Width(rendered) > budget {
+		return ""
+	}
+	return rendered
+}
+
+// truncateTitleToWidth shortens a title to at most maxCells display columns,
+// appending an ellipsis when it had to cut. It measures display width rather
+// than rune count so CJK and emoji titles stay inside the budget.
+func truncateTitleToWidth(title string, maxCells int) string {
+	title = strings.Join(strings.Fields(title), " ")
+	if maxCells <= 0 {
+		return ""
+	}
+	if lipgloss.Width(title) <= maxCells {
+		return title
+	}
+	// Reserve one cell for the ellipsis, then trim runes until it fits.
+	limit := maxCells - 1
+	var b strings.Builder
+	used := 0
+	for _, r := range title {
+		w := lipgloss.Width(string(r))
+		if used+w > limit {
+			break
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	if b.Len() == 0 {
+		return "…"
+	}
+	return b.String() + "…"
 }
 
 // renderSessionList renders the session picker overlay.
@@ -374,9 +451,16 @@ func (m *Model) renderSessionList() string {
 
 // truncateTitle shortens a session title for the header display.
 func truncateTitle(title string, maxRunes int) string {
+	// A title that reaches here may still carry line breaks (an older stored
+	// session, a hand-edited title). Collapsing first keeps the header to one
+	// row no matter what the caller passed.
+	title = strings.Join(strings.Fields(title), " ")
 	r := []rune(title)
 	if len(r) <= maxRunes {
 		return title
+	}
+	if maxRunes <= 1 {
+		return "…"
 	}
 	return string(r[:maxRunes-1]) + "…"
 }

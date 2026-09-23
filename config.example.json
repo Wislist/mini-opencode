@@ -5,6 +5,9 @@
   },
   "user": "you",
   "assistant": "assistant",
+  "permissions": {
+    "mode": "ask"
+  },
   "mcpServers": {
     "go": {
       "enabled": false,

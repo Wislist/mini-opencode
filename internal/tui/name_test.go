@@ -3,14 +3,14 @@ package tui
 import (
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
+	"charm.land/bubbles/v2/viewport"
 
 	"github.com/wislist/mini-opencode/internal/config"
 )
 
 func newNameTestModel() *Model {
 	return &Model{
-		viewport:     viewport.New(80, 20),
+		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
 		cfg:          &config.Config{User: "you", Assistant: "assistant"},
 		streamingIdx: -1,
 	}

@@ -9,6 +9,7 @@ import (
 type CodingToolOptions struct {
 	WorkDir         string
 	AllowedRoots    []string
+	FullAccess      func() bool
 	Jobs            *JobManager
 	InstructionData InstructionData
 	// Observer records reads and snapshots for the active session.
@@ -32,6 +33,7 @@ func CodingTools(options CodingToolOptions) []agent.Tool {
 	fileOptions := FileOptions{
 		WorkDir:                options.WorkDir,
 		AllowedRoots:           options.AllowedRoots,
+		FullAccess:             options.FullAccess,
 		InstructionData:        options.InstructionData,
 		Observer:               options.Observer,
 		RequireReadBeforeWrite: options.RequireReadBeforeWrite,
@@ -45,6 +47,7 @@ func CodingTools(options CodingToolOptions) []agent.Tool {
 		NewGrepTool(fileOptions),
 		NewBashTool(BashOptions{
 			WorkDir:         options.WorkDir,
+			FullAccess:      options.FullAccess,
 			InstructionData: options.InstructionData,
 			Jobs:            options.Jobs,
 		}),

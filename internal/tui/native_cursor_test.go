@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/wislist/mini-opencode/internal/config"
@@ -21,7 +21,7 @@ func TestNativeCursorPositionTracksIdleInputCursor(t *testing.T) {
 	m.input.SetValue("abc")
 	m.input.CursorEnd()
 
-	_ = m.View()
+	_ = m.renderFrame()
 
 	col, row, ok := m.NativeCursorPosition()
 	if !ok {
@@ -50,7 +50,7 @@ func TestNativeCursorPositionKeepsInputCursorStableWithCommandMenu(t *testing.T)
 		t.Fatal("command menu did not open")
 	}
 
-	_ = m.View()
+	_ = m.renderFrame()
 
 	_, row, ok := m.NativeCursorPosition()
 	if !ok {
@@ -80,7 +80,7 @@ func TestNativeCursorPositionTracksInputWithTodoPanel(t *testing.T) {
 	m.input.SetValue("hi")
 	m.input.CursorEnd()
 
-	view := m.View()
+	view := m.renderFrame()
 
 	col, row, ok := m.NativeCursorPosition()
 	if !ok {

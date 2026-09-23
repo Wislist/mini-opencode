@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
+	"charm.land/bubbles/v2/viewport"
 
 	"github.com/wislist/mini-opencode/internal/config"
 	"github.com/wislist/mini-opencode/internal/session"
@@ -13,7 +13,7 @@ import (
 func TestHandleNewSessionClearsTranscriptAndScreen(t *testing.T) {
 	cfg := config.Default()
 	m := &Model{
-		viewport:      viewport.New(80, 20),
+		viewport:      viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
 		cfg:           &cfg,
 		sessions:      session.NewStore(t.TempDir()),
 		streamingIdx:  3,
@@ -33,8 +33,8 @@ func TestHandleNewSessionClearsTranscriptAndScreen(t *testing.T) {
 	if m.streamingIdx != -1 || m.streamingText != "" {
 		t.Fatalf("streaming state not reset: index=%d text=%q", m.streamingIdx, m.streamingText)
 	}
-	if m.viewport.YOffset != 0 {
-		t.Fatalf("viewport offset = %d, want 0", m.viewport.YOffset)
+	if m.viewport.YOffset() != 0 {
+		t.Fatalf("viewport offset = %d, want 0", m.viewport.YOffset())
 	}
 	if got := m.viewport.View(); strings.Contains(got, "old user message") || strings.Contains(got, "old assistant message") {
 		t.Fatalf("viewport still contains the previous transcript: %q", got)

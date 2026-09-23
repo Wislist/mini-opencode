@@ -1239,7 +1239,11 @@ func generateID(now time.Time) string {
 
 // TitleFromMessage derives a short session title from the first user message.
 func TitleFromMessage(text string) string {
-	text = strings.TrimSpace(text)
+	// Collapse to a single line before measuring: the title is rendered into a
+	// one-row status bar, and a multi-line first message (which the multiline
+	// prompt makes easy to write) would otherwise put newlines into the header
+	// and push it onto several rows.
+	text = strings.Join(strings.Fields(text), " ")
 	if text == "" {
 		return "new session"
 	}

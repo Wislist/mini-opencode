@@ -3,8 +3,8 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 )
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -56,14 +56,22 @@ func (m *Model) handlePlanApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyCtrlD:
+	switch msg.String() {
+	case "ctrl+c", "ctrl+d":
 		m.state = stateQuitting
 		return m, tea.Quit
-	case tea.KeyEnter:
+	case "ctrl+j", "shift+enter", "alt+enter":
+		// Shift+Enter is the expected newline key and works on terminals that
+		// support the kitty keyboard protocol (Bubble Tea v2 negotiates it).
+		// Ctrl+J (LF) and Alt+Enter (ESC CR) are distinct bytes that work even
+		// where the protocol is unavailable, so they stay as fallbacks.
+		m.insertNewline()
+		return m, nil
+	case "enter":
 		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
 			selected := m.commandMenuSelect()
 			m.input.Reset()
+			m.syncInputHeight()
 			m.commandFiltered = nil
 			m.commandCursor = 0
 			if selected != "" {
@@ -75,24 +83,25 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.Reset()
+		m.syncInputHeight()
 		m.commandFiltered = nil
 		m.commandCursor = 0
 		return m.handleInput(input)
-	case tea.KeyUp:
+	case "up":
 		if m.commandMenuOpen() {
 			m.commandMenuMove(-1)
 			return m, nil
 		}
 		m.scrollLines(-keyScrollLines)
 		return m, nil
-	case tea.KeyDown:
+	case "down":
 		if m.commandMenuOpen() {
 			m.commandMenuMove(1)
 			return m, nil
 		}
 		m.scrollLines(keyScrollLines)
 		return m, nil
-	case tea.KeyTab:
+	case "tab":
 		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
 			selected := m.commandMenuSelect()
 			if selected != "" {
@@ -103,18 +112,29 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.toggleMode()
 		return m, nil
-	case tea.KeyEsc:
+	case "esc":
+		// A selection is dismissed first: esc is the natural "never mind"
+		// gesture, and keeping it would leave a highlighted region behind.
+		if m.selection.active {
+			m.clearSelection()
+			return m, nil
+		}
 		if m.commandMenuOpen() {
 			m.input.Reset()
 			m.commandFiltered = nil
 			m.commandCursor = 0
 			return m, nil
 		}
-	case tea.KeyPgUp:
-		m.viewport.HalfViewUp()
+	case "pgup":
+		m.viewport.HalfPageUp()
 		return m, nil
-	case tea.KeyPgDown:
-		m.viewport.HalfViewDown()
+	case "pgdown":
+		m.viewport.HalfPageDown()
+		return m, nil
+	case "ctrl+t":
+		// ctrl+t folds the pinned task panel. Handled here rather than in the
+		// input widget so the key is not swallowed as a text edit.
+		m.toggleTodos()
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -124,8 +144,9 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc, tea.KeyCtrlC:
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.clearSelection()
 		if m.cancel != nil {
 			m.cancel()
 		}
@@ -135,17 +156,25 @@ func (m *Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.addBlock(errorStyle.Render("✗ interrupted"))
 		m.refreshViewport()
 		return m, textinput.Blink
-	case tea.KeyUp:
+	case "up":
 		m.scrollLines(-keyScrollLines)
-	case tea.KeyDown:
+	case "down":
 		m.scrollLines(keyScrollLines)
+	case "ctrl+t":
+		// The panel is most likely to be in the way while the agent is working,
+		// so folding is available during a run too.
+		m.toggleTodos()
+	case "ctrl+j", "shift+enter", "alt+enter":
+		// Drafting the next message while the agent works is a normal thing to
+		// do, so the newline keys stay live during a run.
+		m.insertNewline()
 	}
 	return m, nil
 }
 
 func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc, tea.KeyCtrlC:
+	switch msg.String() {
+	case "esc", "ctrl+c":
 		if m.cancel != nil {
 			m.cancel()
 		}
@@ -154,10 +183,14 @@ func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.addBlock(errorStyle.Render("✗ compact interrupted"))
 		m.refreshViewport()
 		return m, textinput.Blink
-	case tea.KeyUp:
+	case "up":
 		m.scrollLines(-keyScrollLines)
-	case tea.KeyDown:
+	case "down":
 		m.scrollLines(keyScrollLines)
+	case "ctrl+t":
+		// The panel is most likely to be in the way while the agent is working,
+		// so folding is available during a run too.
+		m.toggleTodos()
 	}
 	return m, nil
 }
@@ -190,8 +223,8 @@ func (m *Model) resolvePermission(decision permissionDecision) {
 }
 
 func (m *Model) handleKeyPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEnter:
+	switch msg.String() {
+	case "enter":
 		key := strings.TrimSpace(m.keyInput.Value())
 		m.keyInput.Reset()
 		if key == "" {
@@ -201,7 +234,7 @@ func (m *Model) handleKeyPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 		}
 		return m.saveKey(key)
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case "ctrl+c", "esc":
 		m.keyInput.Reset()
 		m.state = stateIdle
 		return m, textinput.Blink
@@ -209,4 +242,14 @@ func (m *Model) handleKeyPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.keyInput, cmd = m.keyInput.Update(msg)
 	return m, cmd
+}
+
+// toggleTodos folds or unfolds the pinned task panel. The fold state is
+// visible from the panel itself — a one-line summary versus the full list —
+// so the toggle deliberately writes nothing into the transcript: the panel is
+// pinned chrome, not content.
+func (m *Model) toggleTodos() {
+	m.todosCollapsed = !m.todosCollapsed
+	m.invalidateFooter()
+	m.refreshViewport()
 }

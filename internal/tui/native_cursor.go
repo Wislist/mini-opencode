@@ -3,8 +3,8 @@ package tui
 import (
 	"io"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -38,7 +38,7 @@ func (m *Model) computeNativeCursorPosition(header string, footer []string) (col
 		return 0, 0, false
 	}
 
-	baseRow := lipgloss.Height(header) + m.viewport.Height
+	baseRow := lipgloss.Height(header) + m.viewport.Height()
 
 	switch m.state {
 	case stateIdle:
@@ -48,9 +48,12 @@ func (m *Model) computeNativeCursorPosition(header string, footer []string) (col
 		// the native cursor — and the IME pre-edit text — down onto the todo
 		// panel's last row instead of into the input.
 		preFooterHeight := footerSectionsAboveInput(footer, m.footerKinds())
-		// Input bar has a top border, then the editable content row.
-		row = baseRow + preFooterHeight + 2
-		col = inputBarCursorColumn(m.input)
+		// A multiline input grows downward, so the cursor sits on the line the
+		// user is editing rather than always on the first one.
+		caretLine := m.input.Line()
+		// Input bar has a top border, then the editable content rows.
+		row = baseRow + preFooterHeight + 2 + caretLine
+		col = m.inputBarCursorColumn()
 		return clampCursor(col, row, m.width, m.height)
 	case stateKeyPrompt:
 		// Key prompt has a top border, then the content row.
@@ -62,13 +65,37 @@ func (m *Model) computeNativeCursorPosition(header string, footer []string) (col
 	}
 }
 
+// inputBarCursorColumn returns the 1-based column of the caret inside the
+// prompt box.
+//
+// renderInputBar lays out: left border, left padding, "❯", space, then the
+// textarea view. The textarea renders its own prompt column, so only the text
+// before the caret on the current line is measured.
+func (m *Model) inputBarCursorColumn() int {
+	// The textarea's own Prompt is empty: renderInputBar draws the "❯ " glyph
+	// itself, so only that prefix plus the caret offset is measured.
+	prefixWidth := 1 + 1 + lipgloss.Width("❯ ")
+	return prefixWidth + caretColumnWidth(m) + 1
+}
 
-func inputBarCursorColumn(input textinput.Model) int {
-	// renderInputBar lays out: left border, left padding, "❯", space,
-	// textinput view. CUP coordinates are 1-based, so add one more cell to land
-	// on the cursor cell after the already-rendered prefix.
-	prefixWidth := 1 + 1 + lipgloss.Width("❯ ") + visibleCursorPrefixWidth(input)
-	return prefixWidth + 1
+// caretColumnWidth is the display width of the text preceding the caret on the
+// caret's own line, capped to the visible field like the old single-line path.
+func caretColumnWidth(m *Model) int {
+	value := []rune(m.input.Value())
+	// LineInfo gives the byte offset of the caret within the current line.
+	info := m.input.LineInfo()
+	pos := info.StartColumn + info.ColumnOffset
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(value) {
+		pos = len(value)
+	}
+	width := lipgloss.Width(string(value[:pos]))
+	if fieldWidth := m.input.Width(); fieldWidth > 0 && width >= fieldWidth {
+		return max(0, fieldWidth-1)
+	}
+	return width
 }
 
 func keyPromptCursorColumn(input textinput.Model) int {
@@ -88,11 +115,11 @@ func visibleCursorPrefixWidth(input textinput.Model) int {
 		pos = len(value)
 	}
 	width := lipgloss.Width(string(value[:pos]))
-	if input.Width > 0 && width >= input.Width {
+	if input.Width() > 0 && width >= input.Width() {
 		// textinput scrolls horizontally when the cursor moves past the visible
 		// field. Its offset is private, but the cursor remains inside the field;
 		// keep native IME pre-edit text there rather than letting it drift out.
-		return max(0, input.Width-1)
+		return max(0, input.Width()-1)
 	}
 	return width
 }

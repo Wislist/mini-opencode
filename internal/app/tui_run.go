@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/agent/prompt"
@@ -136,7 +136,7 @@ func RunTUI(ctx context.Context) error {
 	fmt.Fprint(output, enableAlternateScrollMode)
 	defer fmt.Fprint(output, disableAlternateScrollMode)
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(output))
+	p := tea.NewProgram(model, tea.WithOutput(output))
 	model.SetProgram(p)
 
 	_, err = p.Run()
@@ -167,6 +167,10 @@ func tuiRuntimeExtras(cfg config.Config, workingDir string, mcpTools []agent.Too
 }
 
 func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extras runtimeExtras) (*agent.Runtime, error) {
+	permissions, err := agent.NewModePermissionPolicy(workingDir, cfg.Workspace.AllowedRoots, model.PermissionMode())
+	if err != nil {
+		return nil, err
+	}
 	promptContext := prompt.DefaultPromptContext(workingDir)
 	contextFiles, err := prompt.DiscoverContextFiles(workingDir, nil)
 	if err != nil {
@@ -203,7 +207,7 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 		agent.WithCompactionThreshold(cfg.Agent.CompactThreshold),
 		agent.WithRunRetries(runRetries(cfg)),
 		agent.WithTodoReader(extras.todoReader),
-		agent.WithPermissionPolicy(agent.NewDefaultPermissionPolicyWithRoots(workingDir, cfg.Workspace.AllowedRoots)),
+		agent.WithPermissionPolicy(permissions),
 		agent.WithPermissionConfirmer(model.MakeConfirmer()),
 		// The danger guard and loop guard must be registered on the TUI path
 		// too, not only in the line-mode CLI: otherwise the interactive UI can
@@ -217,6 +221,7 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 
 	codingOptions := tools.CodingToolOptions{
 		WorkDir:                workingDir,
+		FullAccess:             permissions.FullAccess,
 		AllowedRoots:           cfg.Workspace.AllowedRoots,
 		Observer:               extras.observer,
 		RequireReadBeforeWrite: cfg.Workspace.ReadBeforeWrite(),

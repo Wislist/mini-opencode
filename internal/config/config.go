@@ -8,18 +8,25 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wislist/mini-opencode/internal/agent"
 )
 
 type Config struct {
-	Provider   ProviderConfig             `json:"provider"`
-	MCPServers map[string]MCPServerConfig `json:"mcpServers"`
-	Workspace  WorkspaceConfig            `json:"workspace"`
-	Web        WebConfig                  `json:"web"`
-	Agent      AgentConfig                `json:"agent"`
+	Provider    ProviderConfig             `json:"provider"`
+	MCPServers  map[string]MCPServerConfig `json:"mcpServers"`
+	Workspace   WorkspaceConfig            `json:"workspace"`
+	Web         WebConfig                  `json:"web"`
+	Agent       AgentConfig                `json:"agent"`
+	Permissions PermissionsConfig          `json:"permissions"`
 	// User and Assistant are the display names shown in the TUI message
 	// labels. Defaults are applied in Load when empty.
 	User      string `json:"user,omitempty"`
 	Assistant string `json:"assistant,omitempty"`
+}
+
+type PermissionsConfig struct {
+	Mode agent.PermissionMode `json:"mode"`
 }
 
 type ProviderConfig struct {
@@ -153,10 +160,11 @@ type SecretStore struct {
 
 func Default() Config {
 	return Config{
-		Provider:   ProviderConfig{Name: "echo"},
-		MCPServers: map[string]MCPServerConfig{},
-		User:       "you",
-		Assistant:  "assistant",
+		Provider:    ProviderConfig{Name: "echo"},
+		MCPServers:  map[string]MCPServerConfig{},
+		User:        "you",
+		Assistant:   "assistant",
+		Permissions: PermissionsConfig{Mode: agent.PermissionModeAsk},
 	}
 }
 
@@ -181,6 +189,11 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	mode, err := agent.ParsePermissionMode(string(cfg.Permissions.Mode))
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Permissions.Mode = mode
 	if cfg.Provider.Name == "" {
 		cfg.Provider.Name = "echo"
 	}

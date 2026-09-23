@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/wislist/mini-opencode/internal/config"
 )
@@ -36,8 +36,8 @@ func TestEscInterruptsRunningAndCompacting(t *testing.T) {
 		name string
 		msg  tea.KeyMsg
 	}{
-		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
-		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}},
+		{"esc", key("esc")},
+		{"ctrl+c", key("ctrl+c")},
 	}
 
 	for _, tc := range cases {
@@ -66,7 +66,7 @@ func TestEscInterruptsRunningAndCompacting(t *testing.T) {
 func TestEscWhileIdleDoesNotCancelOrQuit(t *testing.T) {
 	m, cancelled := keyModel(t, stateIdle)
 
-	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model, _ := m.Update(key("esc"))
 	got := model.(*Model)
 
 	if *cancelled {
@@ -82,7 +82,7 @@ func TestEscWhileIdleDoesNotCancelOrQuit(t *testing.T) {
 func TestCtrlCWhileIdleStillQuits(t *testing.T) {
 	m, cancelled := keyModel(t, stateIdle)
 
-	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	model, cmd := m.Update(key("ctrl+c"))
 	got := model.(*Model)
 
 	if *cancelled {

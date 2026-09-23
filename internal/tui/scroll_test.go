@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // newScrollModel builds a model whose viewport contains more lines than it can
@@ -14,8 +14,8 @@ func newScrollModel(t *testing.T) *Model {
 	m := New(nil, "/tmp", "test")
 	m.width = 60
 	m.height = 20
-	m.viewport.Width = 60
-	m.viewport.Height = 5
+	m.viewport.SetWidth(60)
+	m.viewport.SetHeight(5)
 	m.viewport.SetContent(strings.Join([]string{
 		"line 1", "line 2", "line 3", "line 4", "line 5",
 		"line 6", "line 7", "line 8", "line 9", "line 10",
@@ -27,13 +27,10 @@ func TestWheelDownScrollsByTerminalStep(t *testing.T) {
 	m := newScrollModel(t)
 	m.terminal.wheelLines = 3
 
-	updated, _ := m.Update(tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonWheelDown,
-	})
+	updated, _ := m.Update(wheelDown())
 	got := updated.(*Model)
-	if got.viewport.YOffset != 3 {
-		t.Fatalf("wheel down offset = %d, want 3", got.viewport.YOffset)
+	if got.viewport.YOffset() != 3 {
+		t.Fatalf("wheel down offset = %d, want 3", got.viewport.YOffset())
 	}
 }
 
@@ -42,13 +39,10 @@ func TestWheelUpScrollsBackByTerminalStep(t *testing.T) {
 	m.terminal.wheelLines = 3
 	m.viewport.SetYOffset(5)
 
-	updated, _ := m.Update(tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonWheelUp,
-	})
+	updated, _ := m.Update(wheelUp())
 	got := updated.(*Model)
-	if got.viewport.YOffset != 2 {
-		t.Fatalf("wheel up offset = %d, want 2", got.viewport.YOffset)
+	if got.viewport.YOffset() != 2 {
+		t.Fatalf("wheel up offset = %d, want 2", got.viewport.YOffset())
 	}
 }
 
@@ -57,14 +51,16 @@ func TestWheelIgnoresNonPressActionsAndOtherButtons(t *testing.T) {
 	m.terminal.wheelLines = 3
 	m.viewport.SetYOffset(4)
 
+	// v2 delivers each phase as its own message type, so "not a press" is
+	// expressed by the type itself rather than an action field.
 	for _, msg := range []tea.MouseMsg{
-		{Action: tea.MouseActionMotion, Button: tea.MouseButtonWheelDown},
-		{Action: tea.MouseActionRelease, Button: tea.MouseButtonWheelUp},
-		{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft},
-		{Action: tea.MouseActionPress, Button: tea.MouseButtonRight},
+		tea.MouseMotionMsg{Button: tea.MouseWheelDown},
+		tea.MouseReleaseMsg{Button: tea.MouseWheelUp},
+		tea.MouseClickMsg{Button: tea.MouseLeft},
+		tea.MouseClickMsg{Button: tea.MouseRight},
 	} {
 		updated, _ := m.Update(msg)
-		if got := updated.(*Model).viewport.YOffset; got != 4 {
+		if got := updated.(*Model).viewport.YOffset(); got != 4 {
 			t.Fatalf("offset changed to %d for %+v", got, msg)
 		}
 	}
@@ -73,11 +69,11 @@ func TestWheelIgnoresNonPressActionsAndOtherButtons(t *testing.T) {
 func TestArrowKeysScrollOneLine(t *testing.T) {
 	m := newScrollModel(t)
 
-	if updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown}); updated.(*Model).viewport.YOffset != 1 {
-		t.Fatalf("down offset = %d, want 1", updated.(*Model).viewport.YOffset)
+	if updated, _ := m.Update(key("down")); updated.(*Model).viewport.YOffset() != 1 {
+		t.Fatalf("down offset = %d, want 1", updated.(*Model).viewport.YOffset())
 	}
-	if updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp}); updated.(*Model).viewport.YOffset != 0 {
-		t.Fatalf("up offset = %d, want 0", updated.(*Model).viewport.YOffset)
+	if updated, _ := m.Update(key("up")); updated.(*Model).viewport.YOffset() != 0 {
+		t.Fatalf("up offset = %d, want 0", updated.(*Model).viewport.YOffset())
 	}
 }
 
@@ -86,12 +82,12 @@ func TestRunningStateScrollsWithWheelAndKeys(t *testing.T) {
 	m.terminal.wheelLines = 2
 	m.state = stateRunning
 
-	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
-	if got := updated.(*Model).viewport.YOffset; got != 2 {
+	updated, _ := m.Update(wheelDown())
+	if got := updated.(*Model).viewport.YOffset(); got != 2 {
 		t.Fatalf("running wheel offset = %d, want 2", got)
 	}
-	if updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown}); updated.(*Model).viewport.YOffset != 3 {
-		t.Fatalf("running down offset = %d, want 3", updated.(*Model).viewport.YOffset)
+	if updated, _ := m.Update(key("down")); updated.(*Model).viewport.YOffset() != 3 {
+		t.Fatalf("running down offset = %d, want 3", updated.(*Model).viewport.YOffset())
 	}
 }
 

@@ -2,11 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/wislist/mini-opencode/internal/config"
@@ -49,12 +50,12 @@ func TestViewFillsTerminalHeight(t *testing.T) {
 		t.Fatal("WindowSizeMsg returned an unexpected command")
 	}
 
-	view := m.View()
+	view := m.renderFrame()
 	if m.width != width-1 {
 		t.Fatalf("model width = %d, want %d to reserve the terminal's final cell", m.width, width-1)
 	}
-	if m.viewport.Width != width-1 {
-		t.Fatalf("viewport width = %d, want %d", m.viewport.Width, width-1)
+	if m.viewport.Width() != width-1 {
+		t.Fatalf("viewport width = %d, want %d", m.viewport.Width(), width-1)
 	}
 	if got := lipgloss.Height(view); got != height {
 		t.Fatalf("View() height = %d, want %d", got, height)
@@ -69,7 +70,7 @@ func TestViewFillsTerminalHeight(t *testing.T) {
 func TestMarkdownHeadingColors(t *testing.T) {
 	tests := []struct {
 		level int
-		want  lipgloss.TerminalColor
+		want  color.Color
 	}{
 		{level: 1, want: colorRed},
 		{level: 2, want: colorBlue},

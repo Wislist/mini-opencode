@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/config"
@@ -42,7 +42,7 @@ func TestTodoPanelRendersAndStaysHiddenWhenEmpty(t *testing.T) {
 		t.Fatalf("panel missing items: %q", panel)
 	}
 	// The panel participates in the footer layout, so View() must still fit.
-	view := m.View()
+	view := m.renderFrame()
 	if strings.TrimSpace(view) == "" {
 		t.Fatal("View() produced nothing with a todo panel")
 	}
@@ -96,7 +96,7 @@ func TestPermissionAlwaysAddsToolToSessionAllowlist(t *testing.T) {
 	}
 	m.state = statePermission
 
-	m.handlePermissionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m.handlePermissionKey(key("a"))
 	decision := <-resp
 	if !decision.allow || !decision.always {
 		t.Fatalf("decision = %+v, want allow+always", decision)
@@ -156,7 +156,7 @@ func TestPlanApprovalTurnsOffPlanMode(t *testing.T) {
 	m.pendingPlan = &planApprovalMsg{plan: "do the thing", resp: resp}
 	m.state = statePlanApproval
 
-	m.handlePlanApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m.handlePlanApprovalKey(key("y"))
 	if decision := <-resp; !decision.approved {
 		t.Fatalf("decision = %+v", decision)
 	}
@@ -172,7 +172,7 @@ func TestPlanApprovalTurnsOffPlanMode(t *testing.T) {
 	m.mode = ModePlan
 	m.state = statePlanApproval
 	m.pendingPlan = &planApprovalMsg{plan: "another", resp: make(chan planDecision, 1)}
-	m.handlePlanApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m.handlePlanApprovalKey(key("n"))
 	if !hook.IsActive() || m.mode != ModePlan {
 		t.Fatal("rejection must leave plan mode enabled")
 	}
