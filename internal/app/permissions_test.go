@@ -17,7 +17,7 @@ func TestCLIPermissions(t *testing.T) {
 	if err := Run(context.Background(), strings.NewReader(in), &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"帮我批准", "full-access confirm", "permissions: full-access", "permissions: auto-review", "permissions: ask"} {
+	for _, want := range []string{"替我审核", "full-access confirm", "permissions: full-access", "permissions: auto-review", "permissions: ask"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q: %s", want, out.String())
 		}

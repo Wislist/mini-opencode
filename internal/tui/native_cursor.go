@@ -55,11 +55,6 @@ func (m *Model) computeNativeCursorPosition(header string, footer []string) (col
 		row = baseRow + preFooterHeight + 2 + caretLine
 		col = m.inputBarCursorColumn()
 		return clampCursor(col, row, m.width, m.height)
-	case stateKeyPrompt:
-		// Key prompt has a top border, then the content row.
-		row = baseRow + 2
-		col = keyPromptCursorColumn(m.keyInput)
-		return clampCursor(col, row, m.width, m.height)
 	default:
 		return 0, 0, false
 	}

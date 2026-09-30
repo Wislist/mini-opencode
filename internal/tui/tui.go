@@ -27,11 +27,28 @@ const (
 	stateIdle appState = iota
 	stateRunning
 	statePermission
-	stateKeyPrompt
 	stateQuitting
 	stateCompacting
 	stateSessionList
 	statePlanApproval
+	// statePermissions is the /permissions picker: a bottom overlay rather than
+	// transcript output, so browsing the choices does not leave text behind.
+	statePermissions
+	// stateProviderMenu is the /provider picker: the catalog as a bottom
+	// overlay, with the active entry marked and pre-selected.
+	stateProviderMenu
+	// stateModelMenu is the /model picker for the active provider.
+	stateModelMenu
+	// stateProviderForm is the three-field add form (name / endpoint / key).
+	stateProviderForm
+	// stateModelsFetching is the wait between submitting the form and the
+	// provider answering with its model list.
+	stateModelsFetching
+	// stateModelSelect is the multi-select of models the provider reported.
+	stateModelSelect
+	// statePermissionsConfirm is the second step before full access, which is
+	// deliberately not a one-keypress change.
+	statePermissionsConfirm
 )
 
 // InteractionMode toggles between plan (read-only analysis) and code
@@ -95,18 +112,13 @@ type planApprovalMsg struct {
 }
 
 // Callbacks the TUI needs from app.go.
-type KeySaver func(key string) (config.Config, error)
 
-// NameSaver persists custom user/assistant display names and returns the
-// updated config.
-type NameSaver func(user, assistant string) (config.Config, error)
 type RuntimeFactory func(cfg config.Config) (*agent.Runtime, error)
 
 type Model struct {
 	viewport viewport.Model
 	input    textarea.Model
 	spinner  spinner.Model
-	keyInput textinput.Model
 
 	state      appState
 	runtime    *agent.Runtime
@@ -152,6 +164,34 @@ type Model struct {
 	todosCollapsed bool
 	// selection is the current mouse text selection; see selection.go.
 	selection selection
+	// permissionsCursor is the highlighted row in the /permissions picker.
+	permissionsCursor int
+	// providerMenu/modelMenu are snapshots taken when the matching picker
+	// opens; the cursors index into them.
+	providerMenu   []providerMenuItem
+	providerCursor int
+	modelMenu      []string
+	modelCursor    int
+	// providerForm / pendingAdd / modelSelect back the add-provider flow; see
+	// provider_form.go. pendingAdd is nil unless that flow is in progress.
+	providerForm       providerFormState
+	pendingAdd         *pendingProviderAdd
+	modelSelectItems   []string
+	modelSelectChecked []bool
+	modelSelectCursor  int
+	modelSelectErr     string
+	// modelsFetchToken makes a cancelled fetch's late answer identifiable, and
+	// modelsFetchCancel stops the request when the user backs out.
+	modelsFetchToken  int
+	modelsFetchCancel context.CancelFunc
+	// modelFetcher asks the provider which models it serves, with whatever
+	// per-model metadata it advertises. Nil disables the fetch flow with an
+	// explicit error instead of a silent no-op.
+	modelFetcher func(ctx context.Context, baseURL, apiKey string) ([]agent.ModelInfo, error)
+	// modelWindows remembers the context length each fetched model advertised,
+	// so switching to one of them later in the session can set the window
+	// instead of falling back to a guess.
+	modelWindows map[string]int
 	// supportsShiftEnter records whether the terminal can distinguish modified
 	// keys (kitty keyboard protocol). Shift+Enter only arrives as itself when
 	// it can; otherwise the fallback newline keys are the only option.
@@ -208,8 +248,6 @@ type Model struct {
 	// ("always allow"), so repeated prompts for the same tool stop appearing.
 	sessionAllowed map[string]bool
 	pendingPlan    *planApprovalMsg
-	keySaver       KeySaver
-	nameSaver      NameSaver
 	runtimeFactory RuntimeFactory
 	compactor      Compactor
 
@@ -238,7 +276,7 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 
 	ti := textarea.New()
-	ti.Placeholder = "ask anything...  (/help for commands)"
+	ti.Placeholder = "ask anything...  (type / for commands)"
 	ti.Prompt = ""
 	ti.CharLimit = 0
 	ti.ShowLineNumbers = false
@@ -256,16 +294,10 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = spinnerStyle
 
-	ki := textinput.New()
-	ki.Prompt = ""
-	ki.EchoMode = textinput.EchoPassword
-	ki.CharLimit = 0
-
 	return &Model{
 		viewport: vp,
 		input:    ti,
 		spinner:  sp,
-		keyInput: ki,
 		state:    stateIdle,
 		// The initial viewport content has never been built, so the first
 		// refresh must not be skipped.
@@ -286,11 +318,16 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 func (m *Model) SetRuntime(rt *agent.Runtime)        { m.runtime = rt }
 func (m *Model) Runtime() *agent.Runtime             { return m.runtime }
 func (m *Model) SetProgram(p *tea.Program)           { m.program = p }
-func (m *Model) SetKeySaver(ks KeySaver)             { m.keySaver = ks }
-func (m *Model) SetNameSaver(ns NameSaver)           { m.nameSaver = ns }
 func (m *Model) SetRuntimeFactory(rf RuntimeFactory) { m.runtimeFactory = rf }
-func (m *Model) SetCompactor(c Compactor)            { m.compactor = c }
-func (m *Model) SetSessionStore(s *session.Store)    { m.sessions = s }
+
+// SetModelFetcher installs the provider model-list request used by the
+// add-provider form and /model refresh. It is injected rather than called
+// directly so the UI layer owns no network code and stays testable.
+func (m *Model) SetModelFetcher(fetcher func(ctx context.Context, baseURL, apiKey string) ([]agent.ModelInfo, error)) {
+	m.modelFetcher = fetcher
+}
+func (m *Model) SetCompactor(c Compactor)         { m.compactor = c }
+func (m *Model) SetSessionStore(s *session.Store) { m.sessions = s }
 
 // CurrentSessionID returns the active session id, or "" when none exists. It
 // lets collaborators (such as the file observer) resolve the live session
@@ -461,7 +498,7 @@ func (m *Model) SessionAllowedTools() []string {
 
 func (m *Model) Init() tea.Cmd {
 	m.addBlock(dimStyle.Render("welcome to mini-opencode") + "\n" +
-		dimStyle.Render("type /help for commands, or just start typing."))
+		dimStyle.Render("type / for commands, or just start typing."))
 	m.gitStatus = collectGitStatus(m.workingDir)
 	if m.sessions != nil && m.currentSession == nil {
 		m.currentSession = m.sessions.Create("new session")
@@ -502,7 +539,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Wrapping depends on the width, so the visible height has to be
 		// recomputed whenever the terminal is resized.
 		m.syncInputHeight()
-		m.keyInput.SetWidth(max(1, m.width-6))
 		m.refreshViewport()
 		return m, nil
 
@@ -513,6 +549,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.supportsShiftEnter = msg.SupportsKeyDisambiguation()
 		m.invalidateFooter()
 		return m, nil
+
+	case modelsFetchedMsg:
+		model, cmd := m.modelsFetched(msg)
+		return model, cmd
 
 	case spinner.TickMsg:
 		if m.state == stateRunning || m.state == stateCompacting {
@@ -674,11 +714,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
 	}
-	if m.state == stateKeyPrompt {
-		m.keyInput, cmd = m.keyInput.Update(msg)
-		cmds = append(cmds, cmd)
-	}
-
 	return m, tea.Batch(cmds...)
 }
 

@@ -12,7 +12,9 @@ read-before-write, snapshots, plan approval or safety hooks. It is not an OS
 sandbox and cannot constrain arbitrary shell code or an external MCP server.
 
 `internal/agent/tools` contains the coding tool set. The CLI and TUI register
-these plus any tools advertised by configured MCP servers; `/tools` lists the
+these plus any tools advertised by configured MCP servers (there is no `/tools`
+command: the agent's own tool list is what the model sees, and the names come
+from the system prompt); the
 result.
 
 ## Built-in tools

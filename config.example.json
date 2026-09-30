@@ -1,8 +1,20 @@
 {
-  "provider": {
-    "name": "echo",
-    "context_window": 8192
-  },
+  "providers": [
+    {
+      "name": "echo",
+      "type": "echo"
+    },
+    {
+      "name": "relay",
+      "label": "第三方中转",
+      "base_url": "https://relay.example.com/v1",
+      "api_key_env": "RELAY_API_KEY",
+      "models": ["gpt-4o", "deepseek-chat"],
+      "model": "gpt-4o",
+      "context_window": 200000
+    }
+  ],
+  "active_provider": "relay",
   "user": "you",
   "assistant": "assistant",
   "permissions": {
@@ -13,6 +25,13 @@
       "enabled": false,
       "command": "gopls",
       "args": ["mcp"]
+    },
+    "github": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://api.github.com/mcp/",
+      "token_env": "GH_PAT",
+      "timeout_seconds": 30
     }
   }
 }

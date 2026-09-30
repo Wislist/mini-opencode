@@ -15,34 +15,34 @@ import (
 // server so a wedged server cannot stall startup.
 const DefaultStartTimeout = 15 * time.Second
 
-// ServerConfig is the launch configuration for one MCP server.
-type ServerConfig struct {
-	Enabled bool
-	Command string
-	Args    []string
-}
-
 // ServerStatus is the outcome of starting one MCP server, used by the /mcp
 // command and by startup diagnostics.
 type ServerStatus struct {
 	Name    string
 	Enabled bool
+	// Type is the transport after normalization: stdio, http or sse.
+	Type    string
 	Command string
 	Args    []string
-	Tools   int
-	Err     string
+	// URL is the endpoint of a remote transport.
+	URL   string
+	Tools int
+	Err   string
 }
 
 // String renders a one-line human-readable status.
 func (s ServerStatus) String() string {
-	cmdline := strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
+	target := strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
+	if s.Type != "" && s.Type != TransportStdio {
+		target = strings.TrimSpace(s.URL)
+	}
 	switch {
 	case !s.Enabled:
-		return fmt.Sprintf("%s  (disabled)  %s", s.Name, cmdline)
+		return fmt.Sprintf("%s  (disabled)  %s", s.Name, target)
 	case s.Err != "":
 		return fmt.Sprintf("%s  failed: %s", s.Name, s.Err)
 	default:
-		return fmt.Sprintf("%s  %d tools  %s", s.Name, s.Tools, cmdline)
+		return fmt.Sprintf("%s  %d tools  %s", s.Name, s.Tools, target)
 	}
 }
 
@@ -77,15 +77,17 @@ func (m *Manager) Start(ctx context.Context, servers map[string]ServerConfig) {
 		status := ServerStatus{
 			Name:    name,
 			Enabled: cfg.Enabled,
+			Type:    cfg.Transport(),
 			Command: cfg.Command,
 			Args:    cfg.Args,
+			URL:     cfg.URL,
 		}
 		if !cfg.Enabled {
 			m.appendStatus(status)
 			continue
 		}
-		if strings.TrimSpace(cfg.Command) == "" {
-			status.Err = "command is required"
+		if err := cfg.Validate(); err != nil {
+			status.Err = err.Error()
 			m.appendStatus(status)
 			continue
 		}
@@ -105,7 +107,7 @@ func (m *Manager) Start(ctx context.Context, servers map[string]ServerConfig) {
 
 // startServer starts one server and returns the agent tools it advertises.
 func (m *Manager) startServer(ctx context.Context, name string, cfg ServerConfig) ([]agent.Tool, error) {
-	client, err := NewStdioClient(cfg.Command, cfg.Args...)
+	client, err := NewClient(cfg)
 	if err != nil {
 		return nil, err
 	}

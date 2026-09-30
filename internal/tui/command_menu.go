@@ -14,24 +14,19 @@ type CommandItem struct {
 // commandList is the full set of slash commands shown in the autocomplete
 // menu, in display order.
 var commandList = []CommandItem{
-	{"/help", "show this help message"},
-	{"/version", "show version information"},
-	{"/tools", "list registered tools"},
-	{"/workspace", "show workspace root and allowed paths"},
 	{"/mcp", "show MCP server status"},
 	{"/init", "analyze the repo and write AGENTS.md"},
 	{"/fork", "branch this conversation into a new session"},
-	{"/plan", "toggle plan mode (read-only analysis)"},
 	{"/undo", "restore the newest file snapshot"},
 	{"/status", "show git status and context usage"},
-	{"/permissions", "权限：帮我批准 / 完全访问 / 请求批准"},
+	{"/permissions", "权限：完全信任 / 替我审核 / 请求批准"},
+	{"/provider", "列出或切换提供商（add 可新增第三方中转）"},
+	{"/model", "列出或切换当前提供商的模型"},
 	{"/session", "list and switch to a saved conversation"},
 	{"/newsession", "start a new conversation"},
 	{"/archive", "archive current conversation to JSON"},
 	{"/compact", "summarize and replace the conversation context"},
 	{"/memory", "list or search cross-session memories"},
-	{"/key", "set the API key for the current provider"},
-	{"/name", "set or show the user and assistant display names"},
 	{"/quit", "exit the application"},
 }
 

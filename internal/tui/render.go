@@ -12,6 +12,7 @@ import (
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/agent/tools"
+	"github.com/wislist/mini-opencode/internal/config"
 )
 
 // measureTextWidth returns the display width of a string in the same profile
@@ -125,9 +126,11 @@ func (m *Model) footerKinds() []footerSection {
 		kinds = append(kinds, footerSectionOther)
 	case m.state == statePlanApproval && m.pendingPlan != nil:
 		kinds = append(kinds, footerSectionOther)
-	case m.state == stateKeyPrompt:
-		kinds = append(kinds, footerSectionOther)
 	case m.state == stateSessionList:
+		kinds = append(kinds, footerSectionOther)
+	case m.state == stateProviderMenu, m.state == stateModelMenu:
+		kinds = append(kinds, footerSectionOther)
+	case m.state == stateProviderForm, m.state == stateModelsFetching, m.state == stateModelSelect:
 		kinds = append(kinds, footerSectionOther)
 	default:
 		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
@@ -162,10 +165,22 @@ func (m *Model) buildFooter() []string {
 		sections = append(sections, m.renderPermissionPrompt())
 	} else if m.state == statePlanApproval && m.pendingPlan != nil {
 		sections = append(sections, m.renderPlanPrompt())
-	} else if m.state == stateKeyPrompt {
-		sections = append(sections, m.renderKeyPrompt())
 	} else if m.state == stateSessionList {
 		sections = append(sections, m.renderSessionList())
+	} else if m.state == statePermissions {
+		sections = append(sections, m.renderPermissionsMenu())
+	} else if m.state == statePermissionsConfirm {
+		sections = append(sections, m.renderPermissionsConfirm())
+	} else if m.state == stateProviderMenu {
+		sections = append(sections, m.renderProviderMenu())
+	} else if m.state == stateModelMenu {
+		sections = append(sections, m.renderModelMenu())
+	} else if m.state == stateProviderForm {
+		sections = append(sections, m.renderProviderForm())
+	} else if m.state == stateModelsFetching {
+		sections = append(sections, m.renderModelsFetching())
+	} else if m.state == stateModelSelect {
+		sections = append(sections, m.renderModelSelect())
 	} else {
 		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
 			sections = append(sections, m.renderCommandMenu())
@@ -355,7 +370,7 @@ func (m *Model) renderContextSegment() string {
 	}
 	details := m.runtime.ContextDetails()
 	pct := contextPercent(details.Total(), m.cfg.Provider.EffectiveContextWindow())
-	return renderContextBar(pct, details.ConversationTokens)
+	return renderContextBar(pct, details.ConversationTokens, m.cfg.Provider.ContextWindowIsGuess())
 }
 
 func (m *Model) renderInputBar() string {
@@ -366,14 +381,6 @@ func (m *Model) renderInputBar() string {
 	}
 	// border(2) + padding(2) sit on top of Width, so subtract 2 to fit.
 	return m.inputBorderStyle().Width(boxWidth(m)).Render(m.promptStyleM().Render("❯") + " " + m.input.View())
-}
-
-func (m *Model) renderKeyPrompt() string {
-	w := boxWidth(m)
-	label := keyLabel.Render("DeepSeek API Key:")
-	inner := max(1, w-4) // border(2) + padding(2)
-	content := wordWrap(label+" "+m.keyInput.View(), inner)
-	return permBox.Width(w).Render(content)
 }
 
 func (m *Model) renderPermissionPrompt() string {
@@ -412,10 +419,10 @@ func (m *Model) renderHelpBar() string {
 	// or garbles on narrow terminals.
 	//
 	// The command list is deliberately an abbreviated selection rather than
-	// every slash command: the full list is 76 columns, which leaves no room
-	// for the key hints on a standard 80-column terminal, and the hints are
-	// what users cannot discover any other way (/help lists the commands).
-	full := "/help /tools /status /compact /session /quit"
+	// every slash command: the full list does not leave room for the key hints
+	// on a standard 80-column terminal, and the hints are the part users cannot
+	// discover any other way. Typing "/" lists everything.
+	full := "/status /compact /session /provider /quit"
 	hints := []string{"↑↓ scroll", "shift+enter newline", "tab mode", "ctrl+t todos"}
 	right := strings.Join(hints, " · ")
 	fullW := lipgloss.Width(full)
@@ -426,18 +433,21 @@ func (m *Model) renderHelpBar() string {
 	case m.width >= fullW+lipgloss.Width(right)+1:
 		return dimStyle.Render(full) + " " + dimStyle.Render(right)
 	}
-	// Too narrow for both: keep the shortcuts, dropping the least useful first.
+	// Too narrow for both: keep the shortcuts, dropping the least useful first,
+	// and keep one command visible so the slash commands stay discoverable.
+	const anchor = "/status"
 	for i := len(hints); i >= 1; i-- {
 		candidate := strings.Join(hints[:i], " · ")
-		if lipgloss.Width(candidate)+8 <= m.width {
-			return dimStyle.Render("/help · " + candidate)
+		if lipgloss.Width(candidate)+lipgloss.Width(anchor)+3 <= m.width {
+			return dimStyle.Render(anchor + " · " + candidate)
 		}
 	}
-	// Even the shortest shortcut list does not fit. /help is the one hint worth
-	// keeping, but it is still dropped when it cannot fit: the rendering path
-	// never truncates, so an over-wide bar would wrap and displace the input box.
-	if lipgloss.Width("/help") <= m.width {
-		return dimStyle.Render("/help")
+	// Even the shortest shortcut list does not fit. The anchor command is the
+	// last thing kept, and it is dropped too when it cannot fit: the rendering
+	// path never truncates, so an over-wide bar would wrap and displace the
+	// input box.
+	if lipgloss.Width(anchor) <= m.width {
+		return dimStyle.Render(anchor)
 	}
 	return ""
 }
@@ -591,25 +601,6 @@ func toolResultBody(text string, width int) []string {
 	return lines
 }
 
-func (m *Model) renderTools() string {
-	if m.runtime == nil {
-		return dimStyle.Render("no runtime")
-	}
-	var lines []string
-	lines = append(lines, toolName.Render("tools:"))
-	for _, t := range m.runtime.Tools() {
-		nameCol := fmt.Sprintf("  %-12s ", t.Name)
-		nameW := lipgloss.Width(nameCol)
-		descW := max(1, m.width-nameW)
-		for _, wl := range wrapLine(t.Description, descW) {
-			lines = append(lines, nameCol+wl)
-			nameCol = strings.Repeat(" ", nameW)
-		}
-	}
-	w := max(1, m.width)
-	return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
-}
-
 func (m *Model) renderStatus() string {
 	var lines []string
 	lines = append(lines, toolName.Render("status:"))
@@ -632,6 +623,17 @@ func (m *Model) renderStatus() string {
 		source := "estimated"
 		if details.Reported > 0 {
 			source = "provider-reported prompt size"
+		}
+		// The echo provider never sends a request, so a made-up window there is
+		// not worth a warning about a model that does not exist.
+		if m.cfg.Provider.ContextWindowIsGuess() && m.cfg.Provider.EffectiveType() != config.ProviderTypeEcho {
+			// Say what to do about it, not just that it is a guess.
+			warning := fmt.Sprintf(
+				"  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：在 config.json 的 providers[].context_window 指定，或跑 /model refresh 从 /models 读取",
+				formatTokens(window), m.cfg.Provider.Model)
+			for _, wl := range wrapLine(dimStyle.Render(warning), m.width) {
+				lines = append(lines, wl)
+			}
 		}
 		ctxLine := fmt.Sprintf("  %s  %s tokens  %.0f%% of %s  (%d messages, %s)",
 			cmdStyle.Render("ctx"), formatTokens(tokens), pct, formatTokens(window),
@@ -670,36 +672,6 @@ func (m *Model) renderStatus() string {
 	}
 	w := max(1, m.width)
 	return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
-}
-
-func (m *Model) renderHelp() string {
-	return toolName.Render("mini-opencode") + "\n" +
-		dimStyle.Render("  a fresh Go agent terminal") + "\n\n" +
-		"  " + cmdStyle.Render("/help") + "    show this help\n" +
-		"  " + cmdStyle.Render("/version") + " show version\n" +
-		"  " + cmdStyle.Render("/tools") + "   list registered tools\n" +
-		"  " + cmdStyle.Render("/status") + "  show git status and context usage\n" +
-		"  " + cmdStyle.Render("/permissions") + "  帮我批准 / 完全访问 / 请求批准\n" +
-		"  " + cmdStyle.Render("/mcp") + "     show MCP server status\n" +
-		"  " + cmdStyle.Render("/init") + "    analyze the repo and write AGENTS.md\n" +
-		"  " + cmdStyle.Render("/fork") + "    branch this conversation into a new session\n" +
-		"  " + cmdStyle.Render("/plan") + "    toggle plan mode (read-only analysis)\n" +
-		"  " + cmdStyle.Render("/undo") + "    restore the newest file snapshot\n" +
-		"  " + cmdStyle.Render("/session") + "  list and switch to a saved conversation\n" +
-		"  " + cmdStyle.Render("/newsession") + "  start a new conversation\n" +
-		"  " + cmdStyle.Render("/archive") + " archive current conversation to JSON\n" +
-		"  " + cmdStyle.Render("/compact") + " summarize and replace the conversation context\n" +
-		"  " + cmdStyle.Render("/key") + "     set DeepSeek API key\n" +
-		"  " + cmdStyle.Render("/name") + "    set or show user/assistant display names\n" +
-		"  " + cmdStyle.Render("/quit") + "    exit"
-}
-
-// renderNames renders the current user/assistant display names for /name.
-func (m *Model) renderNames() string {
-	return toolName.Render("names:") + "\n" +
-		"  user:      " + m.userLabelStyle().Render(m.cfg.User) + "\n" +
-		"  assistant: " + assistantLabel.Render(m.cfg.Assistant) + "\n" +
-		dimStyle.Render("  /name user <name> | /name assistant <name> | /name <name>")
 }
 
 // renderCommandMenu renders the slash-command autocomplete overlay.
@@ -813,10 +785,17 @@ func contextPercent(used, window int) float64 {
 // (green < 60%, yellow < 85%, red otherwise). The percentage is of the total
 // prompt; conversationTokens is the part that is the actual conversation, shown
 // so a cleared session reads as cleared rather than as an unchanged percentage.
-func renderContextBar(pct float64, conversationTokens int) string {
+//
+// guessed marks a window nobody configured or knew: without the marker a fresh
+// session against a custom model reads as "57% full" and looks like a bug
+// rather than like a missing setting.
+func renderContextBar(pct float64, conversationTokens int, guessed bool) string {
 	label := fmt.Sprintf("ctx %.0f%%", pct)
+	if guessed {
+		label += " (估)"
+	}
 	if conversationTokens > 0 {
-		label = fmt.Sprintf("ctx %.0f%% · %s chat", pct, formatTokens(conversationTokens))
+		label += fmt.Sprintf(" · %s chat", formatTokens(conversationTokens))
 	}
 	switch {
 	case pct < 60:
@@ -828,37 +807,6 @@ func renderContextBar(pct float64, conversationTokens int) string {
 	}
 }
 
-// renderWorkspace builds the /workspace panel: the working directory and any
-// additional allowed roots the agent may access outside it.
-func (m *Model) renderWorkspace() string {
-	var lines []string
-	lines = append(lines, toolName.Render("workspace:"))
-	w := max(1, m.width)
-	rootPrefix := "  " + cmdStyle.Render("root") + "  "
-	rootPrefixW := lipgloss.Width(rootPrefix)
-	for _, wl := range wrapLine(m.workingDir, max(1, w-rootPrefixW)) {
-		lines = append(lines, rootPrefix+wl)
-		rootPrefix = strings.Repeat(" ", rootPrefixW)
-	}
-	roots := m.cfg.Workspace.AllowedRoots
-	if len(roots) == 0 {
-		lines = append(lines, "  "+dimStyle.Render("allowed roots: (none)"))
-	} else {
-		lines = append(lines, "  "+cmdStyle.Render("allowed")+":")
-		bullet := "    - "
-		bulletW := lipgloss.Width(bullet)
-		for _, root := range roots {
-			prefix := bullet
-			for _, wl := range wrapLine(root, max(1, w-bulletW)) {
-				lines = append(lines, prefix+wl)
-				prefix = strings.Repeat(" ", bulletW)
-			}
-		}
-	}
-	return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
-}
-
-// renderMCPStatus lists configured MCP servers and their startup result.
 func (m *Model) renderMCPStatus() string {
 	if m.mcpStatus == nil {
 		return dimStyle.Render("mcp: not configured")

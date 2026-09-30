@@ -384,6 +384,8 @@ func WithPermissionConfirmer(confirmer PermissionConfirmer) RuntimeOption {
 // SetMessages replaces the conversation history. It is used to restore a
 // saved session into the runtime.
 //
+// SetMessages swaps the transcript for a copy of messages.
+//
 // The compaction accounting is reset as well. The token counts and the
 // post-compaction baseline describe the previous conversation, so carrying
 // them into a different one makes needsCompaction report true on the very
@@ -394,6 +396,44 @@ func (r *Runtime) SetMessages(messages []Message) {
 	defer r.mu.Unlock()
 	r.replaceMessagesLocked(messages)
 	r.resetCompactionStateLocked()
+}
+
+// AdoptStateFrom moves the conversation state of src onto r.
+//
+// Switching provider or model builds a runtime from the new configuration, and
+// a fresh runtime knows nothing about the conversation in flight. Copying the
+// transcript, the token accounting and the compaction measurement across is
+// what makes such a switch mid-session non-destructive; the alternative,
+// starting over, reads to the user as losing the session.
+func (r *Runtime) AdoptStateFrom(src *Runtime) {
+	if r == nil || src == nil || r == src {
+		return
+	}
+	// Snapshot the source under its own lock, then write under r's: the two are
+	// different runtimes, and holding both would invite a lock-order problem
+	// with a UI goroutine reading either one.
+	src.mu.Lock()
+	messages := make([]Message, len(src.messages))
+	copy(messages, src.messages)
+	usage := src.usage
+	lastPromptTokens := src.lastPromptTokens
+	postCompactTokens := src.postCompactTokens
+	autoCompactions := src.autoCompactions
+	systemPrompt := src.systemPrompt
+	src.mu.Unlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// replaceMessagesLocked re-derives the compaction marker from the content,
+	// so an already-compacted transcript stays compacted.
+	r.replaceMessagesLocked(messages)
+	r.usage = usage
+	r.lastPromptTokens = lastPromptTokens
+	r.postCompactTokens = postCompactTokens
+	r.autoCompactions = autoCompactions
+	if systemPrompt != "" {
+		r.systemPrompt = systemPrompt
+	}
 }
 
 // resetCompactionStateLocked drops the measurements that describe the previous

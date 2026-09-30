@@ -13,9 +13,18 @@ func TestPermissionsCommand(t *testing.T) {
 	m := New(&cfg, t.TempDir(), "test")
 	m.width = 100
 	m.allowToolForSession("bash")
+	// Bare /permissions opens the picker as an overlay rather than printing the
+	// choices into the transcript; see permissions_menu_test.go.
 	m.handleInput("/permissions")
-	if !strings.Contains(strings.Join(m.blocks, "\n"), "帮我批准") {
+	if m.state != statePermissions {
+		t.Fatal("bare /permissions did not open the picker")
+	}
+	if !strings.Contains(plainText(m.renderPermissionsMenu()), "替我审核") {
 		t.Fatal("missing modes")
+	}
+	m = pressKey(m, key("esc"))
+	if m.state != stateIdle {
+		t.Fatal("esc did not close the picker")
 	}
 	m.handleInput("/permissions full-access")
 	if m.PermissionMode() != agent.PermissionModeAsk {

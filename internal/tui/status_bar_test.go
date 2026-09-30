@@ -140,13 +140,17 @@ func TestHelpBarFitsTerminalWidth(t *testing.T) {
 	}
 }
 
-// TestHelpBarAlwaysOffersACommand 断言缩到极限也仍留 /help ——
-// 用户看到 /help 才知道有命令可查。
-func TestHelpBarAlwaysOffersACommand(t *testing.T) {
-	for _, w := range []int{120, 80, 40, 20, 12, 8} {
+// TestHelpBarKeepsAnAnchorCommand 断言缩到极限也仍留一个命令可查（/status），
+// 但不再提已经删掉的 /help。
+func TestHelpBarKeepsAnAnchorCommand(t *testing.T) {
+	for _, w := range []int{120, 80, 40, 20, 12} {
 		m := statusTestModel(t, w, 30)
-		if bar := plainText(m.renderHelpBar()); !strings.Contains(bar, "/help") {
-			t.Fatalf("w=%d: 帮助栏丢掉了 /help: %q", w, bar)
+		bar := plainText(m.renderHelpBar())
+		if !strings.Contains(bar, "/status") {
+			t.Fatalf("w=%d: 帮助栏丢掉了锚点命令: %q", w, bar)
+		}
+		if strings.Contains(bar, "/help") {
+			t.Fatalf("w=%d: 帮助栏仍在推荐已删除的 /help: %q", w, bar)
 		}
 	}
 }

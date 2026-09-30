@@ -5,20 +5,17 @@ is not a terminal (`app.Run`); the TUI is used otherwise (`app.RunTUI`).
 
 | Command | CLI | TUI | What it does |
 | --- | --- | --- | --- |
-| `/help` | ✅ | ✅ | Show help. |
-| `/version` | ✅ | ✅ | Print the version. |
-| `/tools` | ✅ | ✅ | List the registered tools (including MCP tools). |
-| `/workspace` | ✅ | ✅ | Show the working directory and `workspace.allowed_roots`. |
-| `/permissions [ask\|auto-review\|full-access [confirm]]` | ✅ | ✅ | 查看或切换权限模式；完全访问必须显式确认。 |
-| `/status` | ✅ | ✅ | Workspace, git branch, mode, provider, session, context estimate (split into system prompt vs conversation), provider-reported tokens, session-approved tools, todo list. |
+| `/permissions [ask\|auto-review\|full-access [confirm]]` | ✅ | ✅ | 查看或切换权限模式（完全信任 / 替我审核 / 请求批准）；完全信任必须显式确认。 |
+| `/provider [name]` | ✅ | ✅ | `providers` 目录：列出（标出激活项与密钥来源）或切换到某个提供商。仅本次进程生效。 |
+| `/provider add <name> <base_url> [model]` | ✅ | ✅ | 带参数：新增或就地更新提供商并写入 `config.json`。不带参数（TUI）：打开三框表单。 |
+| `/model [id]` | ✅ | ✅ | 列出当前提供商的模型或切换模型；未列出的 id 也接受。仅本次进程生效。 |
+| `/model refresh` | ✅ | ✅ | 向当前提供商请求 `/models`：拉回全部模型（含厂商上报的上下文窗口），TUI 里多选勾选，CLI 取并集写入 `config.json`。 |
+| `/status` | ✅ | ✅ | Workspace, git branch, mode, provider（含 `window`）, session, context estimate (split into system prompt vs conversation), provider-reported tokens, session-approved tools, todo list。窗口是估值时会额外说明怎么修。 |
 | `/skills` | ✅ | — | List installed skills and curated names. |
 | `/mcp` | ✅ | ✅ | Per-server MCP status: disabled, running (tool count), or the startup error. |
-| `/plan` | ✅ | ✅ | Toggle plan mode. In the TUI, `tab` does the same. |
 | `/init` | ✅ | ✅ | Run one analysis turn with the `initialize` prompt template to create or refresh `AGENTS.md`. |
 | `/fork` | ✅ | ✅ | Branch the current session into a new one that records `parent_session_id`. |
 | `/undo` | ✅ | ✅ | Restore the newest file snapshot recorded in this session. |
-| `/key [key]` | ✅ | ✅ | Save a provider API key and rebuild the runtime. |
-| `/name …` | ✅ | ✅ | Set or show the user/assistant display names. |
 | `/compact` | ✅ | ✅ | Summarize the conversation and make the summary the active head of the transcript (the original messages are retained). |
 | `/memory [query]` | ✅ | ✅ | List stored cross-session memories, or search them when a query is given. |
 | `/session`, `/sessions` | ✅ | ✅ | List saved sessions and switch to one. |
@@ -27,7 +24,7 @@ is not a terminal (`app.Run`); the TUI is used otherwise (`app.RunTUI`).
 | `/quit`, `/exit` | ✅ | ✅ | Exit. |
 
 Unknown `/commands` are rejected with a hint instead of being sent to the
-model as a prompt.
+model as a prompt. `tab` is the only plan-mode switch (the TUI has no `/plan`).
 
 ## Interrupting a run (TUI)
 
@@ -44,6 +41,7 @@ session picker.
 | --- | --- |
 | `tab` | Toggle plan mode (or accept the highlighted slash-command completion). |
 | `ctrl+t` | Fold or unfold the pinned task panel. Works while a run is in progress. |
+| `↑` `↓` `enter` `esc` | Drive the `/permissions` picker. |
 | `shift+enter` | Insert a newline in the prompt box. |
 | `ctrl+j` / `alt+enter` | Insert a newline too; fallbacks for terminals without the kitty keyboard protocol. |
 | `enter` | Send the message. |
@@ -52,6 +50,59 @@ session picker.
 | click (no drag) | Clear the selection. |
 | `esc` | Interrupt a run; otherwise deny a prompt, reject a plan, or close the picker. |
 | `ctrl+c` | Quit when idle, interrupt when running. |
+
+### Permission modes
+
+`/permissions` with no argument opens a picker as a bottom overlay rather than
+printing the choices into the transcript — a menu belongs on the overlay, not in
+the conversation, and leaving it in the scrollback made it read as part of the
+history:
+
+```
+╭──────────────────────────────────────────────────────────────╮
+│ permissions:  ↑↓ select · enter apply · esc cancel           │
+│ ▶ * 请求批准   每次危险操作都询问                            │
+│     替我审核   保守本地规则，不确定时询问                    │
+│     完全信任   跳过逐次审批（需确认）                        │
+│ 仅本次进程生效；不是操作系统沙箱。                           │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+`*` marks the mode in effect. Choosing full access opens a second confirmation
+step, because it removes the per-call approval gate; `esc` there returns to the
+picker rather than dismissing everything. Switching modes also clears the
+session's "always allow" grants, since the trust level is being re-decided.
+
+`/permissions ask|auto-review|full-access [confirm]` still works directly for
+scripts and muscle memory — the picker is an addition, not a replacement.
+
+### Switching provider and model
+
+裸 `/provider`、`/model` 打开浮层，带参数走直接路径（与 `/permissions` 同一套交互）：
+
+```
+╭──────────────────────────────────────────────────────────────╮
+│ provider:  ↑↓ select · enter switch · esc cancel             │
+│ ▶ * relay  我的中转  https://relay.example.com/v1  …  key=config
+│     deepseek  https://api.deepseek.com  …  key=secrets       │
+│     echo  本地回显，无需密钥                                  │
+│ 切换仅本次进程生效；新增用 /provider add <name> <base_url> [model]
+╰──────────────────────────────────────────────────────────────╯
+```
+
+列表最后一行是 `＋ 新增提供商`：进入三框表单（名称 / 地址 / 密钥），提交后向该地址请求
+`/models`，再让你勾选要启用的模型。步骤与键位见 [docs/providers.md](providers.md)。
+
+要点：
+
+- 光标默认停在**当前生效**的提供商上（`*` 标出它），enter 生效、esc 取消。
+- 列表比屏幕长时**跟着光标滚动**，表头显示 `显示 3-8/21`；勾选层同理。
+- 选中当前项是空操作：不会白白重建 runtime。
+- 切换会重建 runtime，但**对话、token 统计、压缩标记、system prompt 都保留**
+  （`Runtime.AdoptStateFrom`）。构建失败（例如新提供商还没密钥）时旧 runtime 继续服务，
+  配置停在新的提供商上，所以紧接着补上的密钥（`/provider add` 同名条目）正好写到正确的名字下。
+- `add` 写 `config.json`；`switch` 与 `/model` 不写（仅本次进程生效）。
+- 每条 provider 行都带 `key=config|env:NAME|secrets|missing`，这行就是「为什么切换失败」的答案。
 
 ### Multiline input
 
@@ -115,10 +166,10 @@ discoverable.
 
 - `ask`（请求批准，默认）：沿用现有策略；超出允许根目录、命中旧命令黑名单直接拒绝，
   `Dangerous` / `RequiresConfirmation` 工具请求人工审批；只读工具照常免审批。
-- `auto-review`（帮我批准）：在默认策略之上，用保守本地规则批准工作区 / allowed roots 内的
+- `auto-review`（替我审核）：在默认策略之上，用保守本地规则批准工作区 / allowed roots 内的
   `write`、`edit`，以及精确的 `pwd`、`/bin/pwd`、`/bin/ls`。不接受额外参数、命令拼接、重定向、
   命令替换、项目脚本或 Git 配置执行；显式后台运行仍需审批。无法判定的需审批操作仍提示用户。不是独立模型审核器。
-- `full-access`（完全访问）：主 agent 的文件工具可访问当前账户有权限的任意路径，
+- `full-access`（完全信任）：主 agent 的文件工具可访问当前账户有权限的任意路径，
   跳过逐次审批和旧命令黑名单。SafetyHook / PlanModeHook / LoopGuardHook、先读后写保持有效。
   普通 `git push` 不再受旧黑名单阻止，但强推、硬重置等仍由 SafetyHook 阻止。
 

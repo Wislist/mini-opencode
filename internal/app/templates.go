@@ -23,9 +23,12 @@ func initSystemPrompt(workingDir string) (string, error) {
 // using the title prompt template.
 type titleGenerator func(ctx context.Context, firstUserMessage string) (string, error)
 
-// makeTitleGenerator builds a title generator bound to the configured
-// provider. It returns nil when no usable provider is configured.
-func makeTitleGenerator(cfg config.Config, workingDir string) titleGenerator {
+// makeTitleGenerator builds a title generator bound to the live configuration.
+//
+// The config is taken by pointer on purpose: tilting happens lazily, long after
+// startup, and /provider can have changed the provider in between. Capturing a
+// copy would keep naming sessions with the provider the user has since left.
+func makeTitleGenerator(cfg *config.Config, workingDir string) titleGenerator {
 	return func(ctx context.Context, firstUserMessage string) (string, error) {
 		provider, err := newProvider(cfg.Provider, workingDir)
 		if err != nil {

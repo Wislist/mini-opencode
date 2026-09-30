@@ -90,7 +90,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 
 	fmt.Fprintf(out, "mini-opencode %s\n", version)
-	fmt.Fprintln(out, "commands: /help /version /tools /workspace /status /permissions /skills /mcp /plan /init /fork /undo /key /compact /session /newsession /archive /quit")
+	fmt.Fprintln(out, "commands: /status /permissions /provider /model /skills /mcp /init /fork /undo /compact /memory /session /newsession /archive /quit")
 
 	for {
 		select {
@@ -120,6 +120,49 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			fmt.Fprintln(out, message)
 			continue
 		}
+		// /provider and /model share their handlers with the TUI so a command
+		// cannot mean one thing in the CLI and another in the TUI. Both are
+		// matched by prefix because /provider takes an optional argument.
+		if input == "/provider" || strings.HasPrefix(input, "/provider ") {
+			result := applyProviderCommand(&cfg, workingDir, input)
+			fmt.Fprintln(out, result.Message)
+			if result.Changed {
+				next, err := replaceRuntimeKeepingState(runtime, func() (*agent.Runtime, error) {
+					if subProvider, perr := newSubagentProvider(cfg, workingDir); perr == nil {
+						extras.subagent = newSubagentRunner(subProvider, workingDir, cfg)
+					}
+					return newRuntime(workingDir, cfg, scanner, out, extras)
+				})
+				if err != nil {
+					reportRebuildFailure(out, err)
+				} else {
+					runtime = next
+				}
+			}
+			continue
+		}
+		if input == "/model" || strings.HasPrefix(input, "/model ") {
+			var result providerCommandResult
+			if strings.TrimSpace(strings.TrimPrefix(input, "/model")) == "refresh" {
+				result = applyModelRefresh(&cfg, workingDir, func(ctx context.Context, baseURL, apiKey string) ([]agent.ModelInfo, error) {
+					return agent.FetchModelCatalog(ctx, baseURL, apiKey, 0)
+				})
+			} else {
+				result = applyModelCommand(&cfg, input)
+			}
+			fmt.Fprintln(out, result.Message)
+			if result.Changed {
+				next, err := replaceRuntimeKeepingState(runtime, func() (*agent.Runtime, error) {
+					return newRuntime(workingDir, cfg, scanner, out, extras)
+				})
+				if err != nil {
+					reportRebuildFailure(out, err)
+				} else {
+					runtime = next
+				}
+			}
+			continue
+		}
 		// /memory takes an optional search query, so it is matched by prefix
 		// before the exact-match switch below.
 		if input == "/memory" || strings.HasPrefix(input, "/memory ") {
@@ -129,16 +172,6 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		}
 
 		switch input {
-		case "/help":
-			printHelp(out)
-		case "/version":
-			fmt.Fprintf(out, "mini-opencode %s\n", version)
-		case "/tools":
-			for _, tool := range runtime.Tools() {
-				fmt.Fprintf(out, "%s\t%s\n", tool.Name, tool.Description)
-			}
-		case "/workspace":
-			printWorkspace(out, workingDir, cfg.Workspace.AllowedRoots)
 		case "/skills":
 			printSkills(out, workingDir)
 		case "/status":
@@ -187,13 +220,6 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 				TotalTokens:      int(fork.PromptTokens + fork.CompletionTokens),
 			})
 			fmt.Fprintf(out, "[branched from %s into %s]\n", fork.ParentSessionID, fork.Title)
-		case "/plan":
-			planHook.SetActive(!planHook.IsActive())
-			if planHook.IsActive() {
-				fmt.Fprintln(out, "[plan mode on] read-only analysis; the agent will submit a plan for approval")
-			} else {
-				fmt.Fprintln(out, "[plan mode off] full tool access restored")
-			}
 		case "/undo":
 			if err := restoreLatestSnapshot(out, sessions, currentSession.ID); err != nil {
 				fmt.Fprintf(out, "error: %v\n", err)
@@ -266,79 +292,14 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 				TotalTokens:      int(sess.PromptTokens + sess.CompletionTokens),
 			})
 			fmt.Fprintf(out, "[switched to: %s]\n", sess.Title)
-		case "/key":
-			if err := configureDeepSeekKey(scanner, out, workingDir, &cfg, ""); err != nil {
-				fmt.Fprintf(out, "error: %v\n", err)
-				continue
-			}
-			if subProvider, perr := newSubagentProvider(cfg, workingDir); perr == nil {
-				extras.subagent = newSubagentRunner(subProvider, workingDir, cfg)
-			}
-			runtime, err = newRuntime(workingDir, cfg, scanner, out, extras)
-			if err != nil {
-				fmt.Fprintf(out, "error: %v\n", err)
-				continue
-			}
-			fmt.Fprintln(out, "[deepseek key saved]")
-		case "/name":
-			fmt.Fprintf(out, "user: %s  assistant: %s\n", cfg.User, cfg.Assistant)
-			fmt.Fprintln(out, "usage: /name user <name> | /name assistant <name> | /name <name>")
 		case "/quit", "quit", "exit":
 			return nil
 		default:
-			if strings.HasPrefix(input, "/") && !strings.HasPrefix(input, "/name ") &&
-				!strings.HasPrefix(input, "/key ") {
-				fmt.Fprintf(out, "unknown command: %s (try /help)\n", input)
+			if strings.HasPrefix(input, "/") {
+				fmt.Fprintf(out, "unknown command: %s（输入 / 会列出可用命令）\n", input)
 				continue
 			}
-			if strings.HasPrefix(input, "/name ") {
-				fields := strings.Fields(strings.TrimPrefix(input, "/name "))
-				var user, assistant string
-				switch fields[0] {
-				case "user", "u":
-					user = strings.Join(fields[1:], " ")
-				case "assistant", "a":
-					assistant = strings.Join(fields[1:], " ")
-				default:
-					user = strings.Join(fields, " ")
-					assistant = user
-				}
-				if user != "" {
-					cfg.User = user
-				}
-				if assistant != "" {
-					cfg.Assistant = assistant
-				}
-				if err := config.Save(filepath.Join(workingDir, "config.json"), cfg); err != nil {
-					fmt.Fprintf(out, "error: %v\n", err)
-					continue
-				}
-				fmt.Fprintf(out, "[names updated] %s / %s\n", cfg.User, cfg.Assistant)
-				continue
-			}
-			if strings.HasPrefix(input, "/key ") {
-				key := strings.TrimSpace(strings.TrimPrefix(input, "/key "))
-				if err := configureDeepSeekKey(scanner, out, workingDir, &cfg, key); err != nil {
-					fmt.Fprintf(out, "error: %v\n", err)
-					continue
-				}
-				if subProvider, perr := newSubagentProvider(cfg, workingDir); perr == nil {
-					extras.subagent = newSubagentRunner(subProvider, workingDir, cfg)
-				}
-				runtime, err = newRuntime(workingDir, cfg, scanner, out, extras)
-				if err != nil {
-					fmt.Fprintf(out, "error: %v\n", err)
-					continue
-				}
-				fmt.Fprintln(out, "[deepseek key saved]")
-				continue
-			}
-			runInput := input
-			if planHook.IsActive() {
-				runInput = "You are in plan mode. Do not modify any files or execute commands. " +
-					"Analyze the request with read-only tools, then call exit_plan_mode with a concrete plan.\n\n" + input
-			}
-			if err := runtime.Run(ctx, runInput, renderEvent(out)); err != nil {
+			if err := runtime.Run(ctx, input, renderEvent(out)); err != nil {
 				fmt.Fprintf(out, "error: %v\n", err)
 			}
 			_ = saveSession(sessions, currentSession, runtime)
@@ -371,7 +332,22 @@ func printStatus(out io.Writer, in statusInput) {
 	}
 	fmt.Fprintf(out, "  mode: %s\n", mode)
 	fmt.Fprintf(out, "  permissions: %s · %s\n", in.cfg.Permissions.Mode, in.cfg.Permissions.Mode.Label())
-	fmt.Fprintf(out, "  provider: %s  model: %s\n", in.cfg.Provider.Name, in.cfg.Provider.Model)
+	if in.cfg.Provider.EffectiveType() == config.ProviderTypeEcho {
+		// The echo provider never sends a request, so a window says nothing and
+		// warning about it would be noise about a model that does not exist.
+		fmt.Fprintf(out, "  provider: %s  model: %s\n", in.cfg.Provider.Name, in.cfg.Provider.Model)
+	} else {
+		fmt.Fprintf(out, "  provider: %s  model: %s  window: %s\n",
+			in.cfg.Provider.Name, in.cfg.Provider.Model,
+			config.FormatContextWindow(in.cfg.Provider.EffectiveContextWindow()))
+	}
+	if in.cfg.Provider.EffectiveType() != config.ProviderTypeEcho && in.cfg.Provider.ContextWindowIsGuess() {
+		// A made-up window is the difference between "your model really is 8k"
+		// and "we do not know": say so where the number is shown, and say how to
+		// fix it.
+		fmt.Fprintf(out, "  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：在 config.json 的 providers[].context_window 指定，或跑 /model refresh 从 /models 读取\n",
+			config.FormatContextWindow(in.cfg.Provider.EffectiveContextWindow()), in.cfg.Provider.Model)
+	}
 	if in.session != nil {
 		fmt.Fprintf(out, "  session: %s  (%s)\n", in.session.Title, in.session.ID)
 	}
@@ -449,28 +425,6 @@ func contextPercent(used, window int) float64 {
 		return 0
 	}
 	return float64(used) / float64(window) * 100
-}
-
-func printHelp(out io.Writer) {
-	fmt.Fprintln(out, "mini-opencode is a fresh Go agent terminal project.")
-	fmt.Fprintln(out, "permissions: /permissions [ask|auto-review|full-access] — 请求批准 / 帮我批准 / 完全访问；完全访问需追加 confirm。")
-	fmt.Fprintln(out, "commands: /key <deepseek-api-key> saves a local key and switches provider to DeepSeek.")
-	fmt.Fprintln(out, "sessions: active conversations are stored in .mini-opencode/sessions.db; /archive exports the current session to .mini-opencode/sessions/<id>.json.")
-	fmt.Fprintln(out, "files: /undo restores the newest file snapshot recorded in this session.")
-}
-
-// printWorkspace reports the working directory and any additional allowed
-// roots the agent may read and write outside the working directory.
-func printWorkspace(out io.Writer, workingDir string, allowedRoots []string) {
-	fmt.Fprintf(out, "workspace: %s\n", workingDir)
-	if len(allowedRoots) == 0 {
-		fmt.Fprintln(out, "allowed roots: (none)")
-		return
-	}
-	fmt.Fprintln(out, "allowed roots:")
-	for _, root := range allowedRoots {
-		fmt.Fprintf(out, "  - %s\n", root)
-	}
 }
 
 // saveSession persists the current runtime messages to the active session.
@@ -726,12 +680,19 @@ func todoReaderFor(cfg config.Config, store tools.TodoStore) agent.TodoReader {
 
 // mcpServerConfigs converts the persisted MCP settings into launch configs.
 func mcpServerConfigs(servers map[string]config.MCPServerConfig) map[string]mcp.ServerConfig {
-	if len(servers) == 0 {
-		return nil
-	}
 	out := make(map[string]mcp.ServerConfig, len(servers))
 	for name, cfg := range servers {
-		out[name] = mcp.ServerConfig{Enabled: cfg.Enabled, Command: cfg.Command, Args: cfg.Args}
+		out[name] = mcp.ServerConfig{
+			Enabled:  cfg.Enabled,
+			Type:     cfg.Type,
+			Command:  cfg.Command,
+			Args:     cfg.Args,
+			URL:      cfg.URL,
+			Headers:  cfg.Headers,
+			Token:    cfg.Token,
+			TokenEnv: cfg.TokenEnv,
+			Timeout:  cfg.Timeout(),
+		}
 	}
 	return out
 }
@@ -792,66 +753,64 @@ func confirmTool(scanner *bufio.Scanner, out io.Writer, sessionAllowed map[strin
 	}
 }
 
+// newProvider builds the agent provider for one configuration entry.
+//
+// The entry's type decides the implementation, not its name: a third-party
+// relay or gateway is configured with an arbitrary name plus its own endpoint
+// and key, and never needs a code change to be usable. Errors name the provider
+// so a multi-provider config is debuggable from the message alone.
 func newProvider(cfg config.ProviderConfig, workingDir string) (agent.Provider, error) {
-	switch strings.ToLower(cfg.Name) {
-	case "", "echo":
+	typ, err := cfg.NormalizedType()
+	if err != nil {
+		return nil, err
+	}
+	switch typ {
+	case config.ProviderTypeEcho:
 		return agent.EchoProvider{}, nil
-	case "deepseek", "openai-compatible", "openai_compatible":
-		apiKey := cfg.ResolvedAPIKeyFrom(workingDir)
+	case config.ProviderTypeOpenAICompatible:
 		retries, retriesSet := cfg.Retries()
-		return agent.NewOpenAICompatibleProvider(agent.OpenAICompatibleConfig{
+		provider, err := agent.NewOpenAICompatibleProvider(agent.OpenAICompatibleConfig{
 			BaseURL:       cfg.BaseURL,
-			APIKey:        apiKey,
+			APIKey:        cfg.ResolvedAPIKeyFrom(workingDir),
 			Model:         cfg.Model,
 			Timeout:       cfg.RequestTimeout(),
 			MaxRetries:    retries,
 			MaxRetriesSet: retriesSet,
 		})
-	default:
-		return nil, fmt.Errorf("unknown provider: %s", cfg.Name)
-	}
-}
-
-func ensureProviderKey(scanner *bufio.Scanner, out io.Writer, workingDir string, cfg *config.Config) error {
-	if strings.ToLower(cfg.Provider.Name) != "deepseek" {
-		return nil
-	}
-	if cfg.Provider.ResolvedAPIKeyFrom(workingDir) != "" {
-		return nil
-	}
-	return configureDeepSeekKey(scanner, out, workingDir, cfg, "")
-}
-
-func configureDeepSeekKey(scanner *bufio.Scanner, out io.Writer, workingDir string, cfg *config.Config, key string) error {
-	if key == "" {
-		fmt.Fprint(out, "DeepSeek API key: ")
-		if !scanner.Scan() {
-			return scanner.Err()
+		if err != nil {
+			return nil, fmt.Errorf("provider %q: %w", cfg.Name, err)
 		}
-		key = strings.TrimSpace(scanner.Text())
+		return provider, nil
+	default:
+		return nil, fmt.Errorf("provider %q: unsupported type %q", cfg.Name, cfg.Type)
 	}
-	if key == "" {
-		return fmt.Errorf("deepseek api key is required")
+}
+
+// replaceRuntimeKeepingState builds a fresh runtime and moves the live
+// conversation onto it.
+//
+// A provider or model switch has to rebuild the runtime — the provider is fixed
+// at construction — but the conversation must survive: without the handover the
+// transcript, the token accounting and the compaction marker would be dropped by
+// the very command whose point is to keep working. When the build fails the old
+// runtime is returned untouched.
+func replaceRuntimeKeepingState(current *agent.Runtime, build func() (*agent.Runtime, error)) (*agent.Runtime, error) {
+	next, err := build()
+	if err != nil {
+		return current, err
 	}
-	provider := cfg.Provider
-	if strings.ToLower(provider.Name) != "deepseek" {
-		provider = config.DefaultDeepSeekProvider()
-	}
-	if provider.BaseURL == "" {
-		provider.BaseURL = "https://api.deepseek.com"
-	}
-	if provider.Model == "" {
-		provider.Model = "deepseek-chat"
-	}
-	if provider.APIKeyEnv == "" {
-		provider.APIKeyEnv = "DEEPSEEK_API_KEY"
-	}
-	provider.APIKey = ""
-	cfg.Provider = provider
-	if err := config.SaveProviderKey(workingDir, provider.Name, key); err != nil {
-		return err
-	}
-	return config.Save(filepath.Join(workingDir, "config.json"), *cfg)
+	next.AdoptStateFrom(current)
+	return next, nil
+}
+
+// reportRebuildFailure explains a failed runtime rebuild.
+//
+// The configured provider has already moved on, so saying which one is still
+// answering is the difference between "my switch silently did nothing" and a
+// clear next step.
+func reportRebuildFailure(out io.Writer, err error) {
+	fmt.Fprintf(out, "error: %v\n", err)
+	fmt.Fprintln(out, "[the previous provider is still serving; fix this with /provider add (同一 provider 名补上密钥) 或换一个提供商]")
 }
 
 // cliPlanApprover prompts on the terminal for a plan verdict and clears plan
@@ -893,7 +852,7 @@ func maybeRetitle(ctx context.Context, out io.Writer, store *session.Store, sess
 	if first == "" {
 		return
 	}
-	generate := makeTitleGenerator(cfg, workingDir)
+	generate := makeTitleGenerator(&cfg, workingDir)
 	if generate == nil {
 		return
 	}

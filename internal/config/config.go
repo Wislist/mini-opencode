@@ -13,12 +13,23 @@ import (
 )
 
 type Config struct {
-	Provider    ProviderConfig             `json:"provider"`
-	MCPServers  map[string]MCPServerConfig `json:"mcpServers"`
-	Workspace   WorkspaceConfig            `json:"workspace"`
-	Web         WebConfig                  `json:"web"`
-	Agent       AgentConfig                `json:"agent"`
-	Permissions PermissionsConfig          `json:"permissions"`
+	// Provider is the resolved active provider. Load keeps it in sync with the
+	// Providers entry that ActiveProvider names, so every existing consumer can
+	// keep reading a single provider without knowing about the catalog.
+	Provider ProviderConfig `json:"provider"`
+	// Providers is the catalog the user can switch between: each entry carries
+	// its own name, endpoint, model list and key, which is what lets a
+	// third-party relay live next to the built-in providers. When it is
+	// non-empty it supersedes the legacy single Provider block.
+	Providers []ProviderConfig `json:"providers,omitempty"`
+	// ActiveProvider names the Providers entry Provider was resolved from. It
+	// is persisted so a restart comes back to the provider last written.
+	ActiveProvider string                     `json:"active_provider,omitempty"`
+	MCPServers     map[string]MCPServerConfig `json:"mcpServers"`
+	Workspace      WorkspaceConfig            `json:"workspace"`
+	Web            WebConfig                  `json:"web"`
+	Agent          AgentConfig                `json:"agent"`
+	Permissions    PermissionsConfig          `json:"permissions"`
 	// User and Assistant are the display names shown in the TUI message
 	// labels. Defaults are applied in Load when empty.
 	User      string `json:"user,omitempty"`
@@ -30,11 +41,26 @@ type PermissionsConfig struct {
 }
 
 type ProviderConfig struct {
-	Name      string `json:"name"`
-	BaseURL   string `json:"base_url"`
-	Model     string `json:"model"`
-	APIKey    string `json:"api_key,omitempty"`
-	APIKeyEnv string `json:"api_key_env"`
+	Name string `json:"name"`
+	// Type selects the provider implementation: "echo" or
+	// "openai-compatible" (aliases: openai, openai_compatible). Empty infers
+	// it from Name: "echo" is the local echo provider, an unnamed provider
+	// without an endpoint is echo too, and anything else is treated as an
+	// OpenAI-compatible endpoint. That inference is what lets a third-party
+	// relay use an arbitrary name.
+	Type string `json:"type,omitempty"`
+	// Label is the human-facing name shown by /provider and /status. Empty
+	// falls back to Name.
+	Label string `json:"label,omitempty"`
+	// BaseURL is the API root, e.g. "https://relay.example.com/v1".
+	BaseURL string `json:"base_url"`
+	Model   string `json:"model"`
+	// Models lists the model ids /model offers for this provider. The active
+	// Model is always included, so a config that only sets model still gets a
+	// picker with one row.
+	Models    []string `json:"models,omitempty"`
+	APIKey    string   `json:"api_key,omitempty"`
+	APIKeyEnv string   `json:"api_key_env"`
 	// ContextWindow is the model's max context size in tokens. When zero,
 	// EffectiveContextWindow falls back to a model-based default.
 	ContextWindow int `json:"context_window,omitempty"`
@@ -148,10 +174,34 @@ func (w WebConfig) Timeout() time.Duration {
 	return time.Duration(w.TimeoutSeconds) * time.Second
 }
 
+// MCPServerConfig configures one MCP server.
+//
+// A stdio server is launched with Command/Args. An http or sse server is
+// reached at URL; Headers are sent verbatim, and Token/TokenEnv become an
+// "Authorization: Bearer" header unless Headers already carries one.
 type MCPServerConfig struct {
-	Enabled bool     `json:"enabled"`
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
+	Enabled bool `json:"enabled"`
+	// Type is the transport: "stdio" (default), "http" or "sse".
+	Type    string   `json:"type,omitempty"`
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	URL     string   `json:"url,omitempty"`
+	// Headers are extra request headers for a remote server, e.g. a tenant id.
+	Headers map[string]string `json:"headers,omitempty"`
+	// Token is a static bearer token. Prefer TokenEnv so the secret stays out
+	// of config.json.
+	Token    string `json:"token,omitempty"`
+	TokenEnv string `json:"token_env,omitempty"`
+	// TimeoutSeconds bounds one request on a remote transport.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+}
+
+// Timeout returns the configured per-request bound, or zero for the default.
+func (c MCPServerConfig) Timeout() time.Duration {
+	if c.TimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.TimeoutSeconds) * time.Second
 }
 
 type SecretStore struct {
@@ -180,13 +230,16 @@ func DefaultDeepSeekProvider() ProviderConfig {
 func Load(path string) (Config, error) {
 	cfg := Default()
 	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return cfg, nil
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return cfg, err
 		}
-		return cfg, err
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	case errors.Is(err, os.ErrNotExist):
+		// No file at all: the defaults apply. They still run through the same
+		// normalization below, so a caller always receives a resolved provider
+		// catalog instead of an empty one it would have to special-case.
+	default:
 		return cfg, err
 	}
 	mode, err := agent.ParsePermissionMode(string(cfg.Permissions.Mode))
@@ -194,8 +247,8 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	cfg.Permissions.Mode = mode
-	if cfg.Provider.Name == "" {
-		cfg.Provider.Name = "echo"
+	if err := cfg.normalizeProviders(); err != nil {
+		return cfg, err
 	}
 	if cfg.MCPServers == nil {
 		cfg.MCPServers = map[string]MCPServerConfig{}
@@ -263,24 +316,14 @@ func (c ProviderConfig) EffectiveContextWindow() int {
 }
 
 // DefaultContextWindow returns a best-guess max context size in tokens for
-// common models. Falls back to a conservative 8k when unknown.
+// common models, falling back to the guess placeholder when the model is
+// unknown. Callers that need to say which of the two they got use
+// KnownContextWindow directly.
 func DefaultContextWindow(model string) int {
-	switch strings.ToLower(model) {
-	case "deepseek-chat":
-		return 1048576
-	case "deepseek-reasoner", "deepseek-coder":
-		return 1048576
-	case "gpt-4o", "gpt-4o-mini":
-		return 128000
-	case "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano":
-		return 1047576
-	case "o3", "o4-mini":
-		return 200000
-	case "":
-		return 8192
-	default:
-		return 8192
+	if window, known := KnownContextWindow(model); known {
+		return window
 	}
+	return guessContextWindow
 }
 
 func (c ProviderConfig) ResolvedAPIKeyFrom(workDir string) string {

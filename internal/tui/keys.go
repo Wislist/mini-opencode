@@ -15,8 +15,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleRunningKey(msg)
 	case statePermission:
 		return m.handlePermissionKey(msg)
-	case stateKeyPrompt:
-		return m.handleKeyPromptKey(msg)
 	case stateQuitting:
 		return m, tea.Quit
 	case stateCompacting:
@@ -25,6 +23,32 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSessionListKey(msg)
 	case statePlanApproval:
 		return m.handlePlanApprovalKey(msg)
+	case statePermissions:
+		return m.handlePermissionsMenuKey(msg)
+	case statePermissionsConfirm:
+		return m.handlePermissionsConfirmKey(msg)
+	case stateProviderMenu:
+		return m.handleProviderMenuKey(msg)
+	case stateModelMenu:
+		return m.handleModelMenuKey(msg)
+	case stateProviderForm:
+		return m.handleProviderFormKey(msg)
+	case stateModelSelect:
+		return m.handleModelSelectKey(msg)
+	case stateModelsFetching:
+		// esc abandons the wait; the late answer is dropped by its token.
+		if msg.String() == "esc" || msg.String() == "ctrl+c" {
+			m.modelsFetchToken++
+			m.pendingAdd = nil
+			if m.modelsFetchCancel != nil {
+				m.modelsFetchCancel()
+				m.modelsFetchCancel = nil
+			}
+			m.state = stateIdle
+			m.refreshViewport()
+			return m, m.input.Focus()
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -220,28 +244,6 @@ func (m *Model) resolvePermission(decision permissionDecision) {
 	m.pendingPerm = nil
 	m.state = stateRunning
 	m.refreshViewport()
-}
-
-func (m *Model) handleKeyPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "enter":
-		key := strings.TrimSpace(m.keyInput.Value())
-		m.keyInput.Reset()
-		if key == "" {
-			m.state = stateIdle
-			m.addBlock(errorStyle.Render("key input cancelled"))
-			m.refreshViewport()
-			return m, textinput.Blink
-		}
-		return m.saveKey(key)
-	case "ctrl+c", "esc":
-		m.keyInput.Reset()
-		m.state = stateIdle
-		return m, textinput.Blink
-	}
-	var cmd tea.Cmd
-	m.keyInput, cmd = m.keyInput.Update(msg)
-	return m, cmd
 }
 
 // toggleTodos folds or unfolds the pinned task panel. The fold state is

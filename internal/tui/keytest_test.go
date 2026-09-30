@@ -20,6 +20,8 @@ func key(name string) tea.KeyMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "space":
+		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 	case "shift+tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: uv.ModShift}
 	case "up":
@@ -72,3 +74,13 @@ func mouseRelease(x, y int) tea.MouseMsg {
 
 func wheelUp() tea.MouseMsg   { return tea.MouseWheelMsg{Button: tea.MouseWheelUp} }
 func wheelDown() tea.MouseMsg { return tea.MouseWheelMsg{Button: tea.MouseWheelDown} }
+
+// typeText feeds a string to the model one rune at a time, the way a terminal
+// delivers typing. Named keys (enter, tab, esc) stay available through key().
+func typeText(m *Model, text string) *Model {
+	for _, r := range text {
+		model, _ := m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = model.(*Model)
+	}
+	return m
+}

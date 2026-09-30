@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/wislist/mini-opencode/internal/agent"
@@ -16,22 +15,6 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 	case input == "/quit" || input == "/exit" || input == "quit" || input == "exit":
 		m.state = stateQuitting
 		return m, tea.Quit
-	case input == "/help":
-		m.addBlock(m.renderHelp())
-		m.refreshViewport()
-		return m, nil
-	case input == "/version":
-		m.addBlock(fmt.Sprintf("mini-opencode %s", m.version))
-		m.refreshViewport()
-		return m, nil
-	case input == "/tools":
-		m.addBlock(m.renderTools())
-		m.refreshViewport()
-		return m, nil
-	case input == "/workspace":
-		m.addBlock(m.renderWorkspace())
-		m.refreshViewport()
-		return m, nil
 	case input == "/mcp":
 		m.addBlock(m.renderMCPStatus())
 		m.refreshViewport()
@@ -40,11 +23,6 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		return m.startInit()
 	case input == "/fork":
 		return m.handleForkSession()
-	case input == "/plan":
-		m.toggleMode()
-		m.addBlock(toolArrow.Render("mode: " + m.mode.String()))
-		m.refreshViewport()
-		return m, nil
 	case input == "/undo":
 		return m.handleUndo()
 	case input == "/status":
@@ -54,19 +32,10 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case input == "/permissions" || strings.HasPrefix(input, "/permissions "):
 		return m.handlePermissions(input)
-	case input == "/key":
-		m.state = stateKeyPrompt
-		m.keyInput.Reset()
-		m.keyInput.Focus()
-		return m, textinput.Blink
-	case strings.HasPrefix(input, "/key "):
-		return m.saveKey(strings.TrimSpace(strings.TrimPrefix(input, "/key ")))
-	case input == "/name":
-		m.addBlock(m.renderNames())
-		m.refreshViewport()
-		return m, nil
-	case strings.HasPrefix(input, "/name "):
-		return m.handleName(input)
+	case input == "/provider" || strings.HasPrefix(input, "/provider "):
+		return m.handleProvider(input)
+	case input == "/model" || strings.HasPrefix(input, "/model "):
+		return m.handleModel(input)
 	case input == "/compact":
 		return m.startCompact()
 	case input == "/memory", strings.HasPrefix(input, "/memory "):
@@ -141,84 +110,6 @@ func (m *Model) startDistill() tea.Cmd {
 		result, err := distiller.Extract(ctx, messages)
 		return memoryDistilledMsg{notes: len(result.Notes), err: err}
 	}
-}
-
-func (m *Model) saveKey(key string) (tea.Model, tea.Cmd) {
-	if m.keySaver != nil {
-		newCfg, err := m.keySaver(key)
-		if err != nil {
-			m.addBlock(errorStyle.Render("✗ " + err.Error()))
-		} else {
-			*m.cfg = newCfg
-			m.addBlock(toolArrow.Render("[deepseek key saved]"))
-			if m.runtimeFactory != nil {
-				rt, rerr := m.runtimeFactory(newCfg)
-				if rerr != nil {
-					m.addBlock(errorStyle.Render("✗ " + rerr.Error()))
-				} else {
-					m.SetRuntime(rt)
-				}
-			}
-		}
-	}
-	m.state = stateIdle
-	m.refreshViewport()
-	return m, textinput.Blink
-}
-
-// handleName parses a "/name" command. Supported forms:
-//
-//	/name                    show current names
-//	/name user <name>        set the user display name
-//	/name assistant <name>   set the assistant display name
-//	/name <name>             set both names to <name>
-func (m *Model) handleName(input string) (tea.Model, tea.Cmd) {
-	args := strings.TrimSpace(strings.TrimPrefix(input, "/name"))
-	fields := strings.Fields(args)
-	if len(fields) == 0 {
-		m.addBlock(m.renderNames())
-		m.refreshViewport()
-		return m, nil
-	}
-
-	var user, assistant string
-	switch fields[0] {
-	case "user", "u":
-		if len(fields) < 2 {
-			m.addBlock(errorStyle.Render("usage: /name user <name>"))
-			m.refreshViewport()
-			return m, nil
-		}
-		user = strings.Join(fields[1:], " ")
-	case "assistant", "a":
-		if len(fields) < 2 {
-			m.addBlock(errorStyle.Render("usage: /name assistant <name>"))
-			m.refreshViewport()
-			return m, nil
-		}
-		assistant = strings.Join(fields[1:], " ")
-	default:
-		// "/name <value>" sets both labels at once.
-		user = strings.Join(fields, " ")
-		assistant = user
-	}
-
-	if m.nameSaver == nil {
-		m.addBlock(errorStyle.Render("name saver not configured"))
-		m.refreshViewport()
-		return m, nil
-	}
-	newCfg, err := m.nameSaver(user, assistant)
-	if err != nil {
-		m.addBlock(errorStyle.Render("✗ " + err.Error()))
-	} else {
-		*m.cfg = newCfg
-		m.addBlock(toolArrow.Render("[names updated] " +
-			m.userLabelStyle().Render(m.cfg.User) + " / " + assistantLabel.Render(m.cfg.Assistant)))
-	}
-	m.state = stateIdle
-	m.refreshViewport()
-	return m, textinput.Blink
 }
 
 // startInit runs one analysis turn with the initialize prompt template so the

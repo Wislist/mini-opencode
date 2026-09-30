@@ -88,7 +88,7 @@ tool 调用**——先在锁内取快照，释放后再调用，回来再取锁�
 | `internal/tui`             | Bubble Tea 界面（model/update/view 拆分到多个文件）                      |
 | `internal/session`         | SQLite 会话存储（messages / files / read_files / todos + FTS5 全文检索） |
 | `internal/memory`          | 跨会话记忆：Markdown 笔记、自动提炼（Distiller）、按需召回               |
-| `internal/mcp`             | 标准库 JSON-RPC over stdio 的 MCP client 与工具适配                      |
+| `internal/mcp`             | 标准库 JSON-RPC 的 MCP client（stdio / http / sse）与工具适配             |
 | `internal/skills`          | skill 存取、loader、安装器、curated 注册表                               |
 | `internal/diffutil`        | 权限提示用的行级 diff                                                    |
 | `internal/config`          | `config.json` / `.mini-opencode/secrets.json`                            |
@@ -135,12 +135,55 @@ CLI 与 TUI 两条入口都要注册全部三个。
   目录或 `workspace.allowed_roots` 内。`allowed_roots` 在 `config.Load` 时被规范化
   （绝对 + clean + 去重）。
 
+### 命令面
+
+斜杠命令只有一套：`/status /permissions /provider /model /skills(仅 CLI) /mcp /init /fork
+/undo /compact /memory /session /newsession /archive /quit`。
+**`/help`、`/version`、`/tools`、`/workspace`、`/plan`、`/key`、`/name` 已删除**，两条入口
+（CLI 与 TUI）都不再有它们的 handler、补全项与文案；新增命令要给两侧都加实现，别只加一边。
+plan 模式的唯一开关是 TUI 的 `tab`（`ModePlan`），CLI 不再有 plan 入口，所以 CLI 侧也没有
+plan 模式的提示注入。发现性靠：输入 `/` 拉起补全菜单 + 底部帮助栏的锚点命令。
+
 ### Provider
 
 `echo` 是默认兜底（无 `config.json` 时也用 echo，`Load` 在文件不存在时返回默认值
-且不报错）。`deepseek` 走 OpenAI 兼容 `/chat/completions`，SSE 流式，请求带
+且不报错，但**仍然走一遍 provider 目录规范化**，所以调用方永远拿到已解析的 catalog）。
+`openai-compatible` 走 OpenAI 兼容 `/chat/completions`，SSE 流式，请求带
 `stream_options.include_usage` 以便尾部 chunk 上报 token。
 不可解析的流 chunk 不再退化成空答案，而是变成 `provider_warning` 事件。
+
+**多 provider 目录**（`internal/config/providers.go`）：
+
+- `Config.Provider` 是「已解析的激活项」，`Config.Providers` 是目录，`ActiveProvider`
+  是激活项的名字。三者由 `normalizeProviders()` 在 `Load` 里一次性对齐，**不要**在别处
+  另建一套目录解析。`providers` 非空时整个取代旧的单 `provider` 块。
+- **类型决定实现，名字是自由的**：`ProviderConfig.NormalizedType()` 显式 type 优先，
+  否则按名字推断（`echo` → echo，其余 → openai-compatible）。这就是第三方中转商能直接用
+  自定义名字接入的原因；不要再按名字做 `switch`。
+- 密钥按 provider **名字**存在 secrets.json；`ResolvedAPIKeyFrom` 的优先级是
+  `api_key` → `api_key_env` → secrets。写密钥的入口只有两个：TUI 的 `/provider add` 表单
+  （第三个框，同名就地更新）与 CLI 启动时的提示；**没有 `/key` 命令**，所以任何提示文案
+  都不许再指向它。
+- `/provider`、`/model` 的**解析与状态变更都在 config 包**（`ParseProviderCommand` /
+  `ApplyProviderCommand` / `ParseModelCommand` / `ApplyModelCommand`），CLI 与 TUI 只负责
+  文案和重建 runtime。TUI 不能 import `app`（会成环），所以共享逻辑必须留在 config。
+- **切换 provider / model 必须保住对话**：新 runtime 走 `Runtime.AdoptStateFrom(old)`。
+  重建失败时保留旧 runtime，但配置停在新的提供商上 —— 这样紧接着用 `/provider add`
+  同名条目补上的密钥才写到对的名字下。
+- 切换**不写** `config.json`（文件是配置，菜单选择不是）；`/provider add` 写，且同名是
+  就地更新（空字段从原条目继承，不抹掉用户已有配置）。
+- 惰性/后台工作（会话标题、记忆提炼）必须用 `liveProvider` 或 `*config.Config` 指针解析
+  当前 provider，否则 `/provider` 之后它们仍在用启动时的那个。
+- **上下文窗口绝不能被当成已知事实**（`ContextWindowSource()`）：显式 `context_window` →
+  `config`；内置表认识 → `model`；其余是 `guess`（占位 `guessContextWindow` = 8192）。
+  猜测值必须在 header（`ctx 57% (估)`）、`/status`、`/provider` 行里**标出来**，因为
+  system prompt 地板 ~4.7k 会让它一开机就显示 57%，不标注就会像 bug。
+  占位值取小不取大：早压缩浪费 token，超窗口是硬报错。
+- 厂商自报的窗口是**唯一权威的外部来源**：`agent.FetchModelCatalog` 解析各家字段名
+  （`context_length` / `context_window` / `max_model_len` / `n_ctx` / 嵌套 `top_provider` …），
+  由表单、`/model refresh`（TUI 与 CLI）写进 `context_window`，并在会话内切换模型时跟着
+  模型走（`Model.applyFetchedWindow`）。**只有上报正数才写**——列表里没这个字段时，
+  不许把用户手填的窗口清成 0。
 
 ### TUI
 
@@ -233,6 +276,41 @@ CLI 与 TUI 两条入口都要注册全部三个。
     输入框与正文永不丢。**不要**改成截断字符串——那会把 box 砍开。
   - 光标行号来自 `m.input.Line()`；列宽用 `LineInfo().StartColumn + CharOffset`
     （**StartColumn 已是全局偏移**，再加 ColumnOffset 会重复计数）。
+- **`/permissions` 是浮层，不是转录内容**（`permissions_menu.go`）。新增 `statePermissions`
+  与 `statePermissionsConfirm` 两个状态；`footerKinds` / `buildFooter` 都要同步加分支，
+  否则会退化成默认布局。要点：
+  - 带参数时（`/permissions auto-review`）走原来的直接路径，**不打开菜单**；
+    只有裸 `/permissions` 才进浮层。CLI 行模式不受影响（它没有浮层）。
+  - **菜单行数要按「折行后的物理行」裁**：`wordWrap` 每条返回多行字符串，
+    直接裁切片是裁「条目数」，窄终端下 help 文本折行后菜单仍会溢出。
+    先 `strings.Split` 摊平成物理行，再交给 `fitPermissionMenuRows`。
+  - 完全信任保留二次确认（`statePermissionsConfirm`），菜单化不能把这道闸门去掉；
+    确认页 `esc` 退回选择页而不是直接关闭。
+  - 切换模式要 `clear(m.sessionAllowed)` —— 信任级别变了，旧的「本会话总是允许」不再成立。
+- **`/provider` 与 `/model` 复用 `/permissions` 的浮层套路**（`provider_menu.go`）。新增
+  `stateProviderMenu` / `stateModelMenu`，同样要同步 `footerKinds` / `buildFooter`；
+  裸命令开浮层、带参数走直接路径。要点：
+  - 行快照在**打开菜单时**取一次（`providerMenu` / `modelMenu`），不是每帧重算：内容在
+    光标移动途中变化，会让一次按键落到错的条目上，也让菜单无法脱离真实配置文件测试。
+  - 裁剪走共用的 `fitMenuRows(rows, essential)`（见下面 `menu_layout.go` 一节），
+    `essential` 是「表头 + 全部条目」，尾注先丢。**`fitPermissionMenuRows` 只是它的一个
+    调用点**，不要再复制一份裁剪逻辑。
+  - enter 选中的是**当前生效项**时直接关闭，不重建 runtime。
+  - 切换后必须 `rebuildRuntime()`（内含 `AdoptStateFrom`）；失败时旧 runtime 继续服务，
+    配置停在新的提供商上，理由见上面 Provider 一节。
+- **列表浮层的两套共用工具在 `menu_layout.go`**，新增任何列表都不要自己写裁剪：
+  `menuItemBudget()`（按渲染行算的可见条数）+ `visibleMenuWindow(total, cursor, budget)`
+  （跟着光标滚动的窗口，表头用 `windowLabel` 报 `显示 x-y/total`）+ `fitMenuRows`
+  （尾部可选行裁剪）。**列表必须能在比屏幕长的情况下保持光标可见**，早期版本直接
+  渲染全部条目，长目录会把框推出屏幕且光标跑到看不见的地方。
+- **新增供应商是三框表单 → 拉取 → 多选**（`provider_form.go`，状态
+  `stateProviderForm` / `stateModelsFetching` / `stateModelSelect`）。三条不变量：
+  1. **确认之前不落盘**：表单、拉取、勾选任何一步取消，`config.json` 与 `secrets.json`
+     都不变 —— 所以 `pendingAdd` 只在最后一步写盘，中途取消不能留下半个 provider。
+  2. **拉取走注入的 `modelFetcher` 并作为 `tea.Cmd` 执行**：UI 层不做网络调用、不阻塞
+     Update；`modelsFetchToken` 用来丢弃「取消后迟到」的响应，否则会凭空弹出选择层。
+  3. **空勾选被拒绝**：没有模型的 provider 发不出请求。默认全选，且用
+     `config.MergeModels` 取并集，刷新不得丢掉手写的模型。
 - **鼠标框选复制**（`selection.go`）：`tea.WithMouseCellMotion()` 让终端把鼠标全部交给程序，
   代价是**终端自身的拖拽选择失效**，所以框选必须自己实现。要点：
   - 选区按**屏幕单元格**（`selPoint{row,col}`）建模，`normalizeSelection` 归一化方向

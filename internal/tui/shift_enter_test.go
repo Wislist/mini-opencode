@@ -99,20 +99,6 @@ func TestShiftEnterWorksWhileRunning(t *testing.T) {
 	}
 }
 
-// TestShiftEnterInKeyPrompt 断言密钥输入框不会把 Shift+Enter 当成提交。
-func TestShiftEnterInKeyPrompt(t *testing.T) {
-	m := inputTestModel(t)
-	m.state = stateKeyPrompt
-	m.keyInput.SetValue("sk-partial")
-
-	m = pressKey(m, key("shift+enter"))
-
-	// 密钥输入框是单行的，Shift+Enter 不应提交也不应清空。
-	if m.keyInput.Value() == "" {
-		t.Fatal("Shift+Enter 提交了密钥输入")
-	}
-}
-
 // TestKeyboardEnhancementsMessageIsHandled 断言终端能力消息不会让程序崩溃，
 // 并且程序能记住终端是否支持按键消歧。
 func TestKeyboardEnhancementsMessageIsHandled(t *testing.T) {

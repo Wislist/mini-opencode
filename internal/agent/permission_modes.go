@@ -32,9 +32,9 @@ func ParsePermissionMode(value string) (PermissionMode, error) {
 func (m PermissionMode) Label() string {
 	switch m {
 	case PermissionModeAutoReview:
-		return "帮我批准"
+		return "替我审核"
 	case PermissionModeFullAccess:
-		return "完全访问"
+		return "完全信任"
 	default:
 		return "请求批准"
 	}
@@ -137,7 +137,7 @@ func PermissionCommand(current PermissionMode, input string) (next PermissionMod
 	}
 	fields := strings.Fields(input)
 	if len(fields) == 1 {
-		return current, false, fmt.Sprintf("permissions: %s · %s\n  /permissions auto-review  帮我批准（保守本地规则，不确定时询问）\n  /permissions full-access  完全访问\n  /permissions ask          请求批准\n仅本次进程生效；不是操作系统沙箱。", current, current.Label())
+		return current, false, fmt.Sprintf("permissions: %s · %s\n  /permissions full-access  完全信任（跳过逐次审批，需追加 confirm）\n  /permissions auto-review  替我审核（保守本地规则，不确定时询问）\n  /permissions ask          请求批准（默认）\n仅本次进程生效；不是操作系统沙箱。", current, current.Label())
 	}
 	if len(fields) < 2 || len(fields) > 3 || (len(fields) == 3 && (fields[1] != "full-access" || fields[2] != "confirm")) {
 		return current, false, "usage: /permissions [ask|auto-review|full-access [confirm]]"
@@ -147,7 +147,7 @@ func PermissionCommand(current PermissionMode, input string) (next PermissionMod
 		return current, false, err.Error()
 	}
 	if mode == PermissionModeFullAccess && current != mode && len(fields) != 3 {
-		return current, false, "警告：完全访问将跳过逐次审批并解除工具层工作区限制；可访问当前用户有权限的文件和网络。安全 Hook、plan 模式和先读后写仍有效。\n确认请输入 /permissions full-access confirm"
+		return current, false, "警告：完全信任将跳过逐次审批并解除工具层工作区限制；可访问当前用户有权限的文件和网络。安全 Hook、plan 模式和先读后写仍有效。\n确认请输入 /permissions full-access confirm"
 	}
 	return mode, mode != current, fmt.Sprintf("permissions: %s · %s（仅本次进程；安全 Hook 仍有效）", mode, mode.Label())
 }

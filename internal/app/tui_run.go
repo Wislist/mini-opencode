@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -63,7 +62,7 @@ func RunTUI(ctx context.Context) error {
 	todos := newSessionTodoStore(sessionStore, model.CurrentSessionID)
 
 	model.SetTitleGenerator(func(ctx context.Context, firstUser string) (string, error) {
-		generate := makeTitleGenerator(cfg, workingDir)
+		generate := makeTitleGenerator(&cfg, workingDir)
 		return generate(ctx, firstUser)
 	})
 	model.SetInitPromptProvider(func() (string, error) {
@@ -85,12 +84,6 @@ func RunTUI(ctx context.Context) error {
 		return snap.Path, nil
 	})
 
-	model.SetKeySaver(func(key string) (config.Config, error) {
-		return saveProviderKey(workingDir, &cfg, key)
-	})
-	model.SetNameSaver(func(user, assistant string) (config.Config, error) {
-		return saveDisplayNames(workingDir, &cfg, user, assistant)
-	})
 	model.SetRuntimeFactory(func(newCfg config.Config) (*agent.Runtime, error) {
 		return newTUIRuntime(workingDir, newCfg, model, tuiRuntimeExtras(newCfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model))
 	})
@@ -105,18 +98,22 @@ func RunTUI(ctx context.Context) error {
 		return model.Runtime().CompactDetailed(ctx, summaryPrompt)
 	})
 
-	rt, err := newTUIRuntime(workingDir, cfg, model, tuiRuntimeExtras(cfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model))
+	rt, notice, err := startRuntime(workingDir, &cfg, model, tuiRuntimeExtras(cfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model))
 	if err != nil {
 		return err
 	}
 	model.SetRuntime(rt)
+	if notice != "" {
+		model.AddSystemNotice(notice)
+	}
 	// One store serves both the tool and the /memory command, so a note the
 	// agent writes is immediately visible to the user.
 	memoryStore := memory.NewStore(workingDir)
 	model.SetMemoryStore(memoryStore)
-	if provider, perr := newProvider(cfg.Provider, workingDir); perr == nil {
-		model.SetMemoryDistiller(newDistiller(provider, memoryStore))
-	}
+	// Distillation runs after a run finishes, using whichever provider is
+	// configured *then*: resolving per call keeps it from writing notes through
+	// a provider the user switched away from.
+	model.SetMemoryDistiller(newDistiller(liveProvider{cfg: &cfg, workingDir: workingDir}, memoryStore))
 	for _, status := range mcpManager.Statuses() {
 		if status.Enabled && status.Err != "" {
 			model.AddSystemNotice(fmt.Sprintf("mcp server %q failed: %s", status.Name, status.Err))
@@ -240,29 +237,59 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 	return agent.NewRuntime(provider, options...), nil
 }
 
-func saveProviderKey(workingDir string, cfg *config.Config, key string) (config.Config, error) {
-	provider := cfg.Provider
-	if strings.ToLower(provider.Name) != "deepseek" {
-		provider = config.DefaultDeepSeekProvider()
+// startRuntime builds the TUI runtime, falling back to the local echo provider
+// when the configured one cannot be built.
+//
+// The common cause is a provider that has no key yet. Refusing to open the
+// interface would leave the user with a config file and no way to fix it from
+// inside the app, so the TUI still starts and the notice says which one-liner
+// repairs it (/provider add with the same name writes the key for the
+// configured provider, because the model keeps the original config).
+func startRuntime(workingDir string, cfg *config.Config, model *tui.Model, extras runtimeExtras) (*agent.Runtime, string, error) {
+	rt, err := newTUIRuntime(workingDir, *cfg, model, extras)
+	if err == nil {
+		return rt, "", nil
 	}
-	if provider.BaseURL == "" {
-		provider.BaseURL = "https://api.deepseek.com"
+	fallback := *cfg
+	fallback.Provider = config.ProviderConfig{Name: config.ProviderTypeEcho, Type: config.ProviderTypeEcho}
+	echoRuntime, echoErr := newTUIRuntime(workingDir, fallback, model, extras)
+	if echoErr != nil {
+		// The provider was not the problem; report the original failure.
+		return nil, "", err
 	}
-	if provider.Model == "" {
-		provider.Model = "deepseek-chat"
+	return echoRuntime, fmt.Sprintf(
+		"provider %q 无法启用：%v\n用 /provider add 补上密钥（provider 名照旧填，密钥写在第三个框），或 /provider 换一个提供商（当前先用本地回显运行）。",
+		cfg.Provider.Name, err), nil
+}
+
+// liveProvider resolves the configured provider on every call.
+//
+// Background work wired once at startup — memory distillation, session titles —
+// would otherwise keep talking to whatever provider was configured at launch,
+// silently ignoring a later /provider switch.
+type liveProvider struct {
+	cfg        *config.Config
+	workingDir string
+}
+
+func (p liveProvider) resolve() (agent.Provider, error) {
+	return newProvider(p.cfg.Provider, p.workingDir)
+}
+
+func (p liveProvider) Complete(ctx context.Context, req agent.Request) (agent.AssistantResponse, error) {
+	provider, err := p.resolve()
+	if err != nil {
+		return agent.AssistantResponse{}, err
 	}
-	if provider.APIKeyEnv == "" {
-		provider.APIKeyEnv = "DEEPSEEK_API_KEY"
+	return provider.Complete(ctx, req)
+}
+
+func (p liveProvider) CompleteStream(ctx context.Context, req agent.Request, onDelta func(string)) (agent.AssistantResponse, error) {
+	provider, err := p.resolve()
+	if err != nil {
+		return agent.AssistantResponse{}, err
 	}
-	provider.APIKey = ""
-	cfg.Provider = provider
-	if err := config.SaveProviderKey(workingDir, provider.Name, key); err != nil {
-		return *cfg, err
-	}
-	if err := config.Save(filepath.Join(workingDir, "config.json"), *cfg); err != nil {
-		return *cfg, err
-	}
-	return *cfg, nil
+	return provider.CompleteStream(ctx, req, onDelta)
 }
 
 // saveDisplayNames persists custom user/assistant display names to the

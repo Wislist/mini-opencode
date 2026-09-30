@@ -27,16 +27,28 @@
 - 工具集：bash/read/write/edit/ls/glob/grep/job_output/job_kill/todo_write/todo_blocked/exit_plan_mode/task/web_fetch/web_search/install_skill/memory
 - 文件观察：read-before-write + 改动前快照 + `/undo`
 - 并发：只读工具同一批次并发执行，写操作串行；runtime 状态加锁，`go test -race ./...` 通过
-- 权限：请求批准 / 帮我批准 / 完全访问三种模式、会话级 always-allow、写操作 diff 预览
+- 权限：完全信任 / 替我审核 / 请求批准三种模式、会话级 always-allow、写操作 diff 预览
+- 多 provider：`providers` 目录（自定义名称/端点/模型列表/密钥，第三方中转开箱可用）、
+  `/provider` 与 `/model` 浮层切换（仅本次进程生效）、切换时通过 `AdoptStateFrom` 保住对话；
+  旧的单 `provider` 块继续可用
+- 新增供应商流程（TUI）：`/provider add` 三框表单（名称/地址/密钥，密钥遮罩）→ 向该地址请求
+  `/models` **主动拉取全部模型**（含厂商上报的上下文窗口，自动写进 `context_window`）
+  → 多选勾选（默认全选）→ 写入 `config.json` 并立即切换；
+  校验或拉取失败退回表单且保留已填内容，任何一步 `esc` 都不会落盘。`/model refresh`
+  对当前 provider 做同样的拉取（列表为已配置 ∪ 拉回的并集）
 - Plan 模式闭环：只读约束 + `exit_plan_mode` 提交 + 审批后继续实现
 - todo 执行链：列表未完成的项由 runtime 自动续跑，阻塞由 agent 通过 `todo_blocked` 自行判定
 - todo 面板：只在有未完成项时显示（完成后自动消失），`ctrl+t` 手动显隐，窄/矮终端下自动收缩不溢出
 - run 级重试：整轮 provider 失败自动重试，transcript 不丢、工具不重复执行
+- 上下文窗口：三级来源（显式 `context_window` → 内置模型表 → 占位猜测 8192），**猜测值在
+  header / `/status` / `/provider` 里标成「估值」**，并提供两条修复路径（手填或 `/model refresh`
+  从 `/models` 自动读）
 - 上下文压缩：按剩余余量触发（crush 式阈值）；**非破坏性**——摘要追加并标记，原文保留在
   内存与 SQLite，只在发给 provider 时截断；压缩时把 todo 列表并入总结指令
 - 会话检索：FTS5 全文索引 `messages`，触发器随写同步，可搜索历史会话- 跨会话记忆：`.mini-opencode/memory/*.md`（人类可读可编辑），`memory` 工具主动写入 +
   run 结束后台自动提炼；召回按相关性只注入前 3 条，`/memory` 查看
-- MCP：启动 stdio server、握手、工具以 `<server>__<tool>` 注册、`/mcp` 查看状态
+- MCP：`stdio` + `http`（streamable HTTP，含 `Mcp-Session-Id`）+ `sse`（legacy HTTP+SSE）
+  三种传输，`headers`/`token`/`token_env` 鉴权，工具以 `<server>__<tool>` 注册、`/mcp` 查看状态
 - 会话：SQLite 持久化、message parts、归档、todos、token 统计、`parent_session_id` 分支（`/fork`）
 - Prompt：coder/summary/initialize/title/task/agentic_fetch 模板全部接入
 - Skills：curated/local/GitHub 安装，注入 `<available_skills>`
@@ -101,12 +113,12 @@ CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时
 | 命令 | 模式 | 行为 |
 | --- | --- | --- |
 | `/permissions ask` | 请求批准（默认） | 保留现有 deny/confirm 策略；危险工具弹出人工审批。 |
-| `/permissions auto-review` | 帮我批准 | 保守本地规则自动批准范围内的 `write`/`edit`，及精确命令 `pwd`、`/bin/pwd`、`/bin/ls`；其他需审批工具仍交给用户。不是模型审核器。 |
-| `/permissions full-access confirm` | 完全访问 | 解除主 agent 文件工具的工作区限制、跳过逐次审批及旧命令黑名单；仍受安全 Hook、plan 模式、先读后写与系统账户权限约束。 |
+| `/permissions auto-review` | 替我审核 | 保守本地规则自动批准范围内的 `write`/`edit`，及精确命令 `pwd`、`/bin/pwd`、`/bin/ls`；其他需审批工具仍交给用户。不是模型审核器。 |
+| `/permissions full-access confirm` | 完全信任 | 解除主 agent 文件工具的工作区限制、跳过逐次审批及旧命令黑名单；仍受安全 Hook、plan 模式、先读后写与系统账户权限约束。 |
 
 只输入 `/permissions full-access` 会显示风险提示，不会启用。模式切换仅对本次进程有效，
 清除已有工具 always-allow 授权，不清空对话；不允许在前台 run 中切换，也不会终止已启动的后台进程。
-`/name`、`/key` 保存设置不会意外持久化临时权限模式。启动默认值可显式写入配置：
+保存设置（如 `/provider add`）不会意外持久化临时权限模式。启动默认值可显式写入配置：
 
 ```json
 { "permissions": { "mode": "ask" } }
@@ -130,7 +142,7 @@ CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时
 }
 ```
 
-`allowed_roots` 中的路径（绝对路径或相对当前工作目录）会被规范化为绝对路径并去重，agent 在权限校验和文件工具中都会把这些目录视为可访问范围。用 `/workspace` 命令查看当前工作目录与已允许的根目录。
+`allowed_roots` 中的路径（绝对路径或相对当前工作目录）会被规范化为绝对路径并去重，agent 在权限校验和文件工具中都会把这些目录视为可访问范围（该列表只存在于 `config.json` 里）。
 
 同一节点还控制改文件前的观察策略：
 
