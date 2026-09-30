@@ -95,9 +95,9 @@ go run ./cmd/mini-opencode   # 也可以直接跑，版本号用源码兜底值
 
 | 状态 | 报告的版本 |
 | --- | --- |
-| 正好在 tag 上 | `0.4.0` |
-| tag 后有 N 个提交 | `0.4.0-dev.N.g<sha>` |
-| 没有任何 tag | `0.4.0-dev.g<sha>` |
+| 正好在 tag 上 | `0.5.0` |
+| tag 后有 N 个提交 | `0.5.0-dev.N.g<sha>` |
+| 没有任何 tag | `0.5.0-dev.g<sha>` |
 | 工作区有未提交改动 | 追加 `-dirty` |
 
 基线版本只在 `internal/app/app.go` 定义一处，`scripts/version.sh` 从那里读取，所以

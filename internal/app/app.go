@@ -25,7 +25,7 @@ import (
 // tree always has a meaningful version even without the Makefile. `make build`
 // overrides it with a git-derived value (see the Makefile), which is why the
 // binary — not the source — carries the commit-specific version.
-var version = "0.4.0"
+var version = "0.5.0"
 
 // SetVersion overrides the reported version. The main package calls it from
 // linker-injected values; tests may call it directly.

@@ -6,11 +6,11 @@
 # place rather than a change to this script. Git then supplies the revision
 # detail on top:
 #
-#   exact tag          -> 0.4.0
-#   N commits past tag -> 0.4.0-dev.N.g<sha>
-#   no reachable tag   -> 0.4.0-dev.g<sha>
+#   exact tag          -> 0.5.0
+#   N commits past tag -> 0.5.0-dev.N.g<sha>
+#   no reachable tag   -> 0.5.0-dev.g<sha>
 #   dirty tree         -> adds "-dirty"
-#   not a git repo     -> 0.4.0  (the base version alone)
+#   not a git repo     -> 0.5.0  (the base version alone)
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,7 +24,7 @@ if [ -z "$base" ]; then
   exit 1
 fi
 
-# Strip any suffix already present, so a base like "0.4.0-dev" cannot compound.
+# Strip any suffix already present, so a base like "0.5.0-dev" cannot compound.
 base="${base%%-*}"
 
 # Outside a git checkout (a tarball, a vendored copy) the base version stands

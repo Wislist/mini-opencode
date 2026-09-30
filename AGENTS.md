@@ -35,13 +35,13 @@ go.mod 声明 `go 1.25.0`，本机工具链为 go1.26，直接跑即可。
 
 | 状态                      | 结果                     |
 | ------------------------- | ------------------------ |
-| 正好在 tag 上             | `0.4.0`                  |
-| tag 后有 N 个提交         | `0.4.0-dev.N.g<sha>`     |
-| 没有任何 tag              | `0.4.0-dev.g<sha>`       |
+| 正好在 tag 上             | `0.5.0`                  |
+| tag 后有 N 个提交         | `0.5.0-dev.N.g<sha>`     |
+| 没有任何 tag              | `0.5.0-dev.g<sha>`       |
 | 工作区脏                  | 追加 `-dirty`            |
 | 有 tag 但与源码 base 不符 | 忽略该 tag（源码是权威） |
 
-基线版本唯一来源是 `internal/app/app.go` 的 `var version = "0.4.0"`（普通
+基线版本唯一来源是 `internal/app/app.go` 的 `var version = "0.5.0"`（普通
 `go build` 的兜底值）；`version.sh` 从这行 sed 出来，所以**改版本只需改这一行**。
 `main.go` 里的 `var version string` 是 ldflags 的注入点，空值时 `app.SetVersion`
 会忽略它，不会把兜底值清空。
