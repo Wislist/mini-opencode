@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $appSource = Get-Content -Raw (Join-Path $repoRoot "internal/app/app.go")
-$versionMatch = [regex]::Match($appSource, '(?m)^var version = "([^"]+)"$')
+$versionMatch = [regex]::Match($appSource, '(?m)^var version = "([^"]+)"\r?$')
 if (-not $versionMatch.Success) {
     throw "build.ps1: could not read the base version from internal/app/app.go"
 }
