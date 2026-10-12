@@ -1,7 +1,8 @@
 # mini-opencode
 
-Go 实现的本地 coding agent 终端（Bubble Tea TUI + CLI）。目标平台仅 macOS，
-Shell 通过系统 `bash -lc` 执行，不考虑 Linux/Windows 适配。
+Go 实现的本地 coding agent 终端（Bubble Tea TUI + CLI）。正式支持 macOS 与
+Windows 10/11（推荐 Windows Terminal + PowerShell 7）。Shell 在 macOS 通过系统
+`bash -lc` 执行，在 Windows 优先使用 `pwsh.exe`，并回退到 `powershell.exe`。
 
 ## 沟通风格（仅适用于对话交互）
 
@@ -25,13 +26,19 @@ go test ./internal/agent -run TestRuntimeRun    # 单包 / 单测试
 go run ./cmd/mini-opencode                      # 终端下进入 TUI，管道输入时走行模式 CLI
 ```
 
-`go build ./...` 依然可用，Makefile 只是把重复动作固化下来。没有 CI 配置。
-go.mod 声明 `go 1.25.0`，本机工具链为 go1.26，直接跑即可。
+Windows PowerShell 使用 `./scripts/build.ps1` 构建带 git 版本号的
+`bin/mini-opencode.exe`；测试仍使用 `go test ./...`。
+
+npm/pnpm 分发使用 `npm/` 下的 Node 启动器和四个按平台拆分的原生包；运行
+`cd npm && npm test` 验证包装器，tag 发布流程见 `.github/workflows/npm-release.yml`。
+
+`go build ./...` 依然可用，Makefile 与 PowerShell 脚本只是把重复动作固化下来。
+CI 同时覆盖 macOS 与 Windows。以 go.mod 声明的 Go 版本为准。
 
 ### 版本号
 
-**版本号不在源码里手动维护**，`make build` 时由 `scripts/version.sh` 从 git 推导并用
-`-ldflags -X main.version=...` 注入：
+**版本号不在源码里手动维护**，macOS 的 `make build` / `scripts/version.sh` 与 Windows
+的 `scripts/build.ps1` 都从 git 推导并用 `-ldflags -X main.version=...` 注入：
 
 | 状态                      | 结果                     |
 | ------------------------- | ------------------------ |
@@ -46,7 +53,10 @@ go.mod 声明 `go 1.25.0`，本机工具链为 go1.26，直接跑即可。
 `main.go` 里的 `var version string` 是 ldflags 的注入点，空值时 `app.SetVersion`
 会忽略它，不会把兜底值清空。
 
-发版：改 app.go 的 base → `make tag`（会拒绝脏工作区，也会拒绝重复 tag）。
+发版：在 `main` 改 app.go 的 base → `make check` → 合并 `main` 到 `release` → 在
+`release` 执行 `make tag`（会拒绝脏工作区，也会拒绝重复 tag）→ push `release` 与 tag。
+`release-guard.yml` 拒绝非 `main → release` 的 PR；`v*` tag 会触发 npm 发布，tag 提交
+不在远端 `release` 历史中，或与源码 base 不一致时拒绝发布。
 
 `.gocache/` 是仓库内的本地构建缓存（沙箱无法写共享 Go cache），已在 `.gitignore`
 中；不要提交，也不要把它的内容当成源码。
@@ -55,7 +65,7 @@ go.mod 声明 `go 1.25.0`，本机工具链为 go1.26，直接跑即可。
 
 两个入口共用同一套 runtime，区别只在 UI 层：
 
-- `cmd/mini-opencode/main.go`（`//go:build darwin`）：`os.Stdin` 是终端时调
+- `cmd/mini-opencode/main.go`：`os.Stdin` 是终端时调
   `app.RunTUI`，否则调 `app.Run`（行模式 CLI）。
 - `app.Run` / `app.RunTUI` 都是"装配层"：读 `config.json`、建 session store、
   file observer、todo store、plan hook、启动 MCP server，最后用 `newRuntime`
@@ -91,7 +101,7 @@ tool 调用**——先在锁内取快照，释放后再调用，回来再取锁�
 | `internal/mcp`             | 标准库 JSON-RPC 的 MCP client（stdio / http / sse）与工具适配             |
 | `internal/skills`          | skill 存取、loader、安装器、curated 注册表                               |
 | `internal/diffutil`        | 权限提示用的行级 diff                                                    |
-| `internal/config`          | `config.json` / `.mini-opencode/secrets.json`                            |
+| `internal/config`          | 全局/项目 `config.json` 加载、合并与 provider 全局持久化                  |
 
 ## 约定与不变量
 
@@ -108,7 +118,8 @@ tool 调用**——先在锁内取快照，释放后再调用，回来再取锁�
 - runtime 不 import 具体工具包，只通过 metadata 里的约定 key 感知副作用：
   `todos`/`rendered` 触发 `todos_changed`，`plan`/`approved` 触发
   `plan_submitted`。改这些 key 会静默破坏 UI 联动。
-- `bash` 用 `os/exec` + `bash -lc`，不是 `mvdan/sh`。
+- `bash` 工具名为兼容协议而保留；实现用 `os/exec`，macOS 执行 `bash -lc`，Windows
+  优先 `pwsh.exe`、回退 `powershell.exe`，不经过 `cmd.exe`。
 
 ### Hook
 
@@ -160,18 +171,21 @@ plan 模式的提示注入。发现性靠：输入 `/` 拉起补全菜单 + 底�
 - **类型决定实现，名字是自由的**：`ProviderConfig.NormalizedType()` 显式 type 优先，
   否则按名字推断（`echo` → echo，其余 → openai-compatible）。这就是第三方中转商能直接用
   自定义名字接入的原因；不要再按名字做 `switch`。
-- 密钥按 provider **名字**存在 secrets.json；`ResolvedAPIKeyFrom` 的优先级是
-  `api_key` → `api_key_env` → secrets。写密钥的入口只有两个：TUI 的 `/provider add` 表单
-  （第三个框，同名就地更新）与 CLI 启动时的提示；**没有 `/key` 命令**，所以任何提示文案
-  都不许再指向它。
+- provider 目录、模型、上下文窗口和密钥的唯一持久化来源是全局
+  `~/.mini-opencode/config.json`；项目 `<project>/.mini-opencode/config.json` 中的
+  `provider` / `providers` / `active_provider` 无条件忽略。密钥解析优先级是
+  `api_key` → `api_key_env`，不再读取或写入 `secrets.json`。写密钥的入口只有两个：TUI 的
+  `/provider add` 表单（第三个框，同名就地更新）与 CLI 启动时的提示；**没有 `/key` 命令**，
+  所以任何提示文案都不许再指向它。
 - `/provider`、`/model` 的**解析与状态变更都在 config 包**（`ParseProviderCommand` /
   `ApplyProviderCommand` / `ParseModelCommand` / `ApplyModelCommand`），CLI 与 TUI 只负责
   文案和重建 runtime。TUI 不能 import `app`（会成环），所以共享逻辑必须留在 config。
 - **切换 provider / model 必须保住对话**：新 runtime 走 `Runtime.AdoptStateFrom(old)`。
   重建失败时保留旧 runtime，但配置停在新的提供商上 —— 这样紧接着用 `/provider add`
   同名条目补上的密钥才写到对的名字下。
-- 切换**不写** `config.json`（文件是配置，菜单选择不是）；`/provider add` 写，且同名是
-  就地更新（空字段从原条目继承，不抹掉用户已有配置）。
+- 切换**不写**文件（文件是配置，菜单选择不是）；`/provider add`、`/model refresh` 与
+  `/model context` 只写全局 `~/.mini-opencode/config.json`，且同名 provider 就地更新
+  （空字段从原条目继承，不抹掉用户已有配置）。
 - 惰性/后台工作（会话标题、记忆提炼）必须用 `liveProvider` 或 `*config.Config` 指针解析
   当前 provider，否则 `/provider` 之后它们仍在用启动时的那个。
 - **上下文窗口绝不能被当成已知事实**（`ContextWindowSource()`）：显式 `context_window` →
@@ -193,7 +207,7 @@ plan 模式的提示注入。发现性靠：输入 `/` 拉起补全菜单 + 底�
   一格导致 alt-screen 滚动；`input.Width = m.width-6` 是边框+内边距+prompt 的预留，
   改样式时这两个魔数要一起调。
 - 终端滚轮行为因终端而异（Terminal.app 会加速），集中在 `scroll.go` 的
-  `terminalProfile` 里按 `TERM_PROGRAM` 调参，不要在别处硬编码滚动步长。
+  `terminalProfile` 里按 `TERM_PROGRAM` / `WT_SESSION` 调参，不要在别处硬编码滚动步长。
 - 颜色与样式统一放 `styles.go`（crush 风格调色板），不要在各文件里新建 lipgloss style。
 - **流式渲染必须节流**。`renderAssistantMessage` 会对累积全文跑 glamour，M2 实测渲染速率
   只有 **~0.5MB/s**（重新实测：1KB≈1.6ms、4KB≈6.5ms、16KB≈30ms、64KB≈182ms），
@@ -305,8 +319,9 @@ plan 模式的提示注入。发现性靠：输入 `/` 拉起补全菜单 + 底�
   渲染全部条目，长目录会把框推出屏幕且光标跑到看不见的地方。
 - **新增供应商是三框表单 → 拉取 → 多选**（`provider_form.go`，状态
   `stateProviderForm` / `stateModelsFetching` / `stateModelSelect`）。三条不变量：
-  1. **确认之前不落盘**：表单、拉取、勾选任何一步取消，`config.json` 与 `secrets.json`
-     都不变 —— 所以 `pendingAdd` 只在最后一步写盘，中途取消不能留下半个 provider。
+  1. **确认之前不落盘**：表单、拉取、勾选任何一步取消，全局
+     `~/.mini-opencode/config.json` 不变 —— 所以 `pendingAdd` 只在最后一步写盘，中途取消
+     不能留下半个 provider。
   2. **拉取走注入的 `modelFetcher` 并作为 `tea.Cmd` 执行**：UI 层不做网络调用、不阻塞
      Update；`modelsFetchToken` 用来丢弃「取消后迟到」的响应，否则会凭空弹出选择层。
   3. **空勾选被拒绝**：没有模型的 provider 发不出请求。默认全选，且用
@@ -436,5 +451,5 @@ plan 模式的提示注入。发现性靠：输入 `/` 拉起补全菜单 + 底�
 
 ## 密钥
 
-不要提交 API key。`config.json` 和 `.mini-opencode/` 已 gitignore；密钥存在
-`.mini-opencode/secrets.json`。
+不要提交 API key。provider 密钥只存在全局 `~/.mini-opencode/config.json` 的 `api_key`
+字段，或由 `api_key_env` 指向环境变量；优先使用环境变量。

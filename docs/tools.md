@@ -21,7 +21,7 @@ result.
 
 | Tool | Purpose |
 | --- | --- |
-| `bash` | Shell commands via `bash -lc`, with validation, output truncation, and background jobs. |
+| `bash` | Platform shell commands (`bash -lc` on macOS, PowerShell on Windows), with validation, output truncation, and background jobs. |
 | `read` | Read a workspace file with optional line range limits. |
 | `write` | Create or overwrite a file. |
 | `edit` | Exact string replacement in an existing file. |
@@ -39,10 +39,14 @@ result.
 | `install_skill` | Install a `SKILL.md` skill from a curated name, local path, or GitHub repo. |
 | `memory` | Read and write durable notes that outlive the conversation (see `docs/memory.md`). |
 
-`bash` uses `os/exec` with `bash -lc`, not `mvdan/sh`. It supports command
-validation, banned-command checks, working directory validation, output
-truncation, foreground execution, explicit background execution, and
-auto-backgrounding after a configured duration.
+The tool name remains `bash` for protocol compatibility, but execution follows
+the host platform. It uses `os/exec` with `bash -lc` on macOS. On Windows it
+prefers `pwsh.exe`, falls back to `powershell.exe`, and passes the command through
+`-NoLogo -NoProfile -NonInteractive -Command` without an intermediate `cmd.exe`.
+It supports command validation, banned-command checks, working directory
+validation, output truncation, foreground execution, explicit background
+execution, and auto-backgrounding after a configured duration. PowerShell 5.1
+commands must not rely on `&&`; use `;` and inspect `$LASTEXITCODE` when needed.
 
 `read`, `write`, `edit`, and `ls` share workspace path validation. Relative
 paths resolve under the work directory; absolute paths are allowed only when

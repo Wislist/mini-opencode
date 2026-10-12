@@ -5,7 +5,20 @@
 
 ## 目录与激活项
 
-配置分两块，都在 `config.json`：
+配置分成两层：
+
+```text
+~/.mini-opencode/config.json             # 全局：provider、模型、窗口、API key
+<project>/.mini-opencode/config.json     # 项目：workspace、memory、MCP 等普通设置
+```
+
+启动先读取全局配置，再用项目配置覆盖普通项目设置。在 Git 仓库中，从启动目录向上查找
+最近的项目配置，但不越过 Git 根；非 Git 目录只读取当前目录的项目配置。项目配置里的
+`provider`、`providers`、`active_provider` 会无条件忽略，因此不能替换全局 provider、
+模型、上下文窗口或密钥。旧的项目根 `config.json` 与 `secrets.json` 不再读取或写入。
+仅启动读取不会创建配置文件；相对 `allowed_roots` 仍相对启动工作目录解析。
+
+提供商配置分两块，都在全局 `~/.mini-opencode/config.json`：
 
 - `providers`：提供商数组（目录）。每项一个条目。
 - `active_provider`：启动时使用哪一项（按名字匹配，大小写不敏感）。
@@ -33,7 +46,7 @@
 解析顺序（`config.Load`）：
 
 1. `providers` 非空时，**它就是整个目录**，旧的单 `provider` 块被忽略。
-2. `providers` 为空时，旧的 `provider` 块（如果有）充当整个目录 —— 老配置原样可用。
+2. `providers` 为空时，旧的 `provider` 块（如果有）仅作为迁移输入，读取后转为目录。
 3. 都不存在时是内置的 `echo`。
 4. 激活项：`active_provider` 指定的那一项；没写就是目录里的**第一项**。
    `active_provider` 写了但名字不存在会**报错**（列出已配置的名字），不会静默回落到第一项。
@@ -45,7 +58,7 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `name` | 提供商名字，`/provider`、`secrets.json` 都用它做主键；不能含空白 |
+| `name` | 提供商名字，`/provider` 用它做主键；不能含空白 |
 | `label` | 展示名（`/provider`、`/status` 显示它，缺省用 `name`） |
 | `type` | `echo` 或 `openai-compatible`（别名 `openai`、`openai_compatible`）；留空按名字推断 |
 | `base_url` | API 根地址，例如 `https://relay.example.com/v1` |
@@ -68,7 +81,7 @@
 ```bash
 /provider                                         # 列出目录，标出激活项和密钥来源
 /provider relay                                   # 切到 relay（仅本次进程生效）
-/provider add relay https://relay.example.com/v1 gpt-4o   # 新增/更新并写入 config.json
+/provider add relay https://relay.example.com/v1 gpt-4o   # 新增/更新并写入全局 config
 /model                                            # 列出当前提供商的模型
 /model deepseek-chat                              # 切换模型（仅本次进程生效）
 ```
@@ -100,31 +113,33 @@ TUI 里 `/provider` 打开列表，最后一行 `＋ 新增提供商`（或直�
 │ ▶ [x] deepseek-chat                                           │
 │   [ ] deepseek-reasoner                                       │
 │   [x] qwen3:30b                                               │
-│ 勾选的模型会写进 config.json 的 models，第一个勾选的成为当前 model。 │
+│ 勾选的模型会写进全局 ~/.mini-opencode/config.json，第一个勾选的成为当前 model。 │
 ╰───────────────────────────────────────────────────────────────╯
 ```
 
 - **默认全选**（拉回来的一个都不丢），`space` 取消个别，`a` 全选/全不选，`enter` 确认。
 - 一个都不勾会被拒绝：没有模型的 provider 发不出任何请求。
-- **确认之前不落盘**：表单、拉取、勾选任何一步 `esc` 取消，`config.json` 与
-  `secrets.json` 都不会变。
+- **确认之前不落盘**：表单、拉取、勾选任何一步 `esc` 取消，全局
+  `~/.mini-opencode/config.json` 都不会变。
 - 拉取失败（401 / 超时 / 不是 OpenAI 兼容端点）会退回表单并保留已填内容，可以改了重试。
 - 密钥留空则**跳过拉取**直接保存（配合 `api_key_env` 的场景），并提示之后补上密钥：
-  再用一次 `/provider add`（同名条目会就地更新，第三个框写密钥）或改 `config.json`。
+  再用一次 `/provider add`（同名条目会就地更新，第三个框写密钥）或改全局配置。
 - 该地址返回空列表时也保存，并说明要用 `/model <id>` 指定。
 
 `/model refresh` 对当前 provider 做同一件事：重新拉取并多选，列表是
 **已配置 ∪ 拉回来的并集**（刷新不会丢掉手写的模型），已勾选状态默认全选。
 
 CLI 行模式没有浮层：`/provider add <name> <base_url> [model]` 直接保存，
-`/model refresh` 拉取后取**并集**写入 `config.json`（脚本友好，不可交互勾选）。
+`/model refresh` 拉取后取**并集**写入全局 `~/.mini-opencode/config.json`
+（脚本友好，不可交互勾选）。
 
 要点：
 
-- **切换只影响本次进程**：`/provider relay`、`/model x` 都不写 `config.json`。文件是配置，
-  一次菜单选择不是。要固定下来就改 `active_provider` / `model`。
-- **`add` 会写 `config.json`** —— 「新增提供商」本身就是配置变更。同名条目是**就地更新**，
-  只覆盖你给出的字段，其余（label、timeout、models…）保留。
+- **切换只影响本次进程**：`/provider relay`、`/model x` 本身都不写文件。文件是配置，
+  一次菜单选择不是。要固定下来就改全局配置中的 `active_provider` / `model`。
+- **目录维护只写全局配置**：`/provider add`、`/model refresh`、`/model context` 写
+  `~/.mini-opencode/config.json`，不会把 provider 写进项目配置。同名条目是**就地更新**，
+  只覆盖相应字段，其余（label、timeout、models…）保留。
 - **`/model <id>` 不校验** id 是否在 `models` 里：中转商可能提供你没枚举的模型，
   拒绝它们恰好把这命令在最需要的地方废掉。切换后该 id 会出现在 `/model` 列表里。
 - **切换会重建 runtime，但不会丢对话**：新 runtime 通过 `Runtime.AdoptStateFrom` 继承
@@ -169,55 +184,36 @@ CLI 行模式没有浮层：`/provider add <name> <base_url> [model]` 直接保�
 
 ## 密钥
 
-**不要提交 API key。** `config.json` 和 `.mini-opencode/` 都在 `.gitignore` 里。
+**不要提交 API key。** provider 密钥只来自全局 `~/.mini-opencode/config.json`，不会从项目
+配置或 `secrets.json` 读取。全局配置保存权限为 `0600`。
 
-密钥按优先级解析：`api_key` → `api_key_env` → `.mini-opencode/secrets.json`（按提供商
-名字存）。
-
-```text
-.mini-opencode/secrets.json
-{
-  "provider_keys": {
-    "relay": "sk-...",
-    "deepseek": "sk-..."
-  }
-}
-```
+密钥按优先级解析：`api_key` → `api_key_env`。推荐使用 `api_key_env`，避免把明文密钥长期
+写在 JSON 中。
 
 写密钥有三条路：
 
-1. **TUI 的新增表单**（推荐）：`/provider add` 的第三个框就是密钥，确认时写进
-   `secrets.json`（0600 权限），并把它作为该提供商的主密钥。
-2. **改 `config.json`**：`api_key`（明文，最省事但会随文件流传）或 `api_key_env`
-   （从环境变量读，推荐）。
+1. **TUI 的新增表单**：`/provider add` 的第三个框就是密钥，确认时写进该 provider 的
+   `api_key` 字段。
+2. **改全局配置**：填写 `api_key`（明文）或 `api_key_env`（从环境变量读，推荐）。
 3. **CLI 启动提示**：行模式下激活的提供商缺密钥时，进入对话前会先问一次。
 
-密钥一律按**提供商名字**存进 `.mini-opencode/secrets.json`；`/provider` 列表每行都会显示
-`key=config|env:NAME|secrets|missing`，这行就是「为什么这个提供商发不出请求」的答案。
+`/provider` 列表每行都会显示 `key=config|env:NAME|missing`，这行就是「为什么这个提供商
+发不出请求」的答案。
 
 给已有提供商换密钥：再跑一次 `/provider add`，**名字填一样的**，地址与密钥正常填——
 同名是就地更新，不会新增条目。
 
-启动时如果激活的提供商缺密钥：TUI 会以 `echo` 起界面，并在转录里提示用
-`/provider add` 补上或换一个提供商，而不是直接退出。
+启动时如果激活的提供商缺密钥：TUI 会以 `echo` 起界面，不再向转录添加启动提示。
+配置仍保留原激活项，可通过 `/provider add` 补上密钥或 `/provider` 切换提供商。
 
-## 旧的单 provider 配置
+## 配置格式与旧配置迁移
 
-老配置不需要改：
+全局配置统一使用 `providers` 数组和 `active_provider`，保存时不会再输出单独的
+`provider` 块。运行时的 `Config.Provider` 只是当前激活项的解析结果。
 
-```json
-{
-  "provider": {
-    "name": "deepseek",
-    "base_url": "https://api.deepseek.com",
-    "model": "deepseek-chat",
-    "api_key_env": "DEEPSEEK_API_KEY"
-  }
-}
-```
-
-它会被当成只有一个条目的目录；一旦你新增了 `providers` 数组，`provider` 块就不再参与
-解析（`/provider add` 重写文件时也会把它写成目录形式，`active_provider` 记录当前激活项）。
+全局文件中的旧单 `provider` 块仍可读取，作为只有一个条目的目录迁移；下一次通过配置命令
+保存时，会写成多提供商格式。若两种字段同时存在，以非空的 `providers` 为准。项目配置中
+即使存在这些字段也不会参与迁移或生效。
 
 ## Retries and timeouts
 
@@ -246,3 +242,25 @@ provider 上报的 `usage` 累计在 runtime 上、持久化到会话（`prompt_
 `completion_tokens`）并由 `/status` 显示。上下文指示器优先用上一次 completion 上报的
 `prompt_tokens`（真实分词），provider 不上报时退回本地估算（约 4 个 ASCII 字符 1 token，
 非 ASCII 每 rune 1 token）。
+
+### 手动设置上下文窗口
+
+在 TUI 输入 `/model`，按 `c` 会填入 `/model context `，补充窗口大小后按 Enter 保存。
+CLI 也支持相同命令：
+
+```text
+/model context 1M
+/model context 128K
+/model context 1000000
+/model context auto
+/model context
+```
+
+K/M 不区分大小写，分别表示 1,000 / 1,000,000 tokens；只接受正整数，
+`auto` 清除显式设置，恢复内置模型表或估值。无参数时只显示当前窗口。
+设置写入全局 `~/.mini-opencode/config.json` 的当前提供商目录项，并立即重建 runtime、保留会话，
+ctx 百分比和自动压缩使用新窗口。写入失败不修改内存配置。
+
+窗口是**提供商级别**，该提供商下切换模型仍共用这个值；`/model refresh`
+或模型切换时已有的厂商窗口元数据仍可更新它。请按实际接口和模型支持的额度设置；
+填写 1M 不会扩大服务端额度。设置可能同时保存当前进程中的其他配置选择。

@@ -43,6 +43,7 @@ front matter 只支持本包写入的最小子集（每行一个 `key: value`，
 
 自动提炼在 run 结束、UI 已回到 idle 之后才发起，**不会让用户多等**；它用独立
 的 `context.Background()` + 60s 超时，所以取消 run 不会连带取消提炼。
+提炼成功或失败都不会向对话记录追加提示：这是后台增强，不改变用户刚收到的回答。
 
 提炼的输入会**丢掉工具调用流量**（tool 输出基本是文件内容和命令日志，对「提炼
 持久知识」是噪声且会占满请求），只保留 user / assistant 轮次；压缩摘要
@@ -64,15 +65,69 @@ Notes you saved in earlier sessions that may be relevant now. ...
 </memories>
 ```
 
+默认使用词面检索。也可以显式开启 `hybrid`，把词面排名与 embedding 相似度排名通过
+RRF（Reciprocal Rank Fusion，`k=60`）融合：
+
+```json
+{
+  "memory": {
+    "retrieval": "hybrid",
+    "embedding_provider": "relay",
+    "embedding_model": "text-embedding-3-small",
+    "top_k": 3,
+    "candidate_k": 12,
+    "max_tokens": 1600,
+    "min_similarity": 0.35
+  }
+}
+```
+
+`embedding_provider` 是 `providers` 目录中的 provider 名字，可以与聊天 provider 不同；
+它必须是 OpenAI-compatible 端点，并提供 `/embeddings`。provider 目录和密钥来自全局
+`~/.mini-opencode/config.json`，密钥按 `api_key` → `api_key_env` 解析。
+
+| 字段 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `retrieval` | `lexical` | 只有显式写 `hybrid` 才启用向量检索 |
+| `top_k` | `3` | 注入 system prompt 的最大笔记数 |
+| `candidate_k` | `12` | 词面、向量各自参加 RRF 的候选数 |
+| `max_tokens` | `1600` | 召回结果的近似 token 上限 |
+| `min_similarity` | `0.35` | 向量候选的最低 cosine 相似度 |
+
 关键点：
 
 - **打分而不是全量塞**。把所有笔记塞进每个 system prompt 会花掉 memory 本来要省的
   上下文预算。查询不相关时不注入任何内容（`MemoryRecallSection` 返回 `""`）。
 - 查询文本来自 `Model.MemoryQuery()`：跳过压缩摘要和 todo 续跑注入，取第一条真正的
   用户消息；新会话无 transcript 时回退到输入框内容。
-- 打分是刻意简单的词面匹配（整串 > 标题 > tag > 正文，稳定 tie-break）。笔记量是
-  几十个小文件，全文索引只会增加机制而不增加价值，可解释性更重要。
+- 词面打分保留（整串 > 标题 > tag > 正文，稳定 tie-break），因此精确符号名不会因为
+  启用 embedding 就丢掉优势。混合模式是在它旁边增加语义召回，不是替换它。
 - 中文没有空格分隔，所以 tokenize 对 CJK **逐字**成词，否则所有中文笔记会得同分。
+- embedding 请求、索引打开、同步或查询任一步失败，都会自动退回词面结果；memory 不会
+  因外部 embedding 服务不可用而阻断 agent。
+
+## 向量索引
+
+混合模式把 note 级向量缓存在：
+
+```text
+<workDir>/.mini-opencode/memory-index.db
+```
+
+SQLite 只保存 `note_name + content_hash + embedding_model + vector`。每次检索前按 Markdown
+内容的 SHA-256 增量同步：未变笔记不重复 embedding，修改笔记只更新自身，删除笔记会清理
+对应行。这个数据库可以随时删除；下一次混合检索会从 `.mini-opencode/memory/*.md` 重建。
+
+**Markdown 始终是唯一事实源**。索引损坏、被删或 embedding 服务离线，都不会影响笔记
+本身，也不会改变 `read` / `write` / `list` / `delete` 的语义。
+
+当前范围刻意保持小：
+
+- 一篇 memory Markdown 是一个向量，不做段落切块；
+- 不索引源码、会话 transcript、文档目录或整个工作区；
+- recall 在 runtime 构建时按会话启动 query 注入，不是每一轮用户消息都重新召回。
+
+所以这是一版 **memory note RAG**，不是全仓库 code RAG。
 
 ## 工具
 
@@ -96,7 +151,8 @@ Notes you saved in earlier sessions that may be relevant now. ...
 /memory <query>      按 query 搜索
 ```
 
-CLI 与 TUI 都支持。**注意**：`/memory` 是按前缀匹配的，不能被放进精确匹配的
+CLI 与 TUI 都支持，启用 hybrid 后搜索也走融合检索；TUI 用异步 command 执行，embedding
+HTTP 不会阻塞 `Update`。**注意**：`/memory` 是按前缀匹配的，不能被放进精确匹配的
 `switch input` 里（Go 不允许在 string switch 的 case 里混入 bool 表达式），
 它在 switch 之前单独处理。
 
