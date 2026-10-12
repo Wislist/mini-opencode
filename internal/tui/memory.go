@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -23,6 +24,12 @@ type memoryDistilledMsg struct {
 	err   error
 }
 
+type memorySearchMsg struct {
+	query string
+	notes []memory.Note
+	err   error
+}
+
 // SetMemoryDistiller attaches the background memory extractor. A nil distiller
 // disables automatic extraction; the memory tool still works.
 func (m *Model) SetMemoryDistiller(d *memory.Distiller) { m.memoryDistiller = d }
@@ -31,6 +38,10 @@ func (m *Model) SetMemoryDistiller(d *memory.Distiller) { m.memoryDistiller = d 
 // separate setter from the distiller because a user may want to inspect memory
 // even when automatic extraction is unavailable.
 func (m *Model) SetMemoryStore(s *memory.Store) { m.memoryStore = s }
+
+// SetMemoryRetriever attaches the query path used by /memory. Search runs in a
+// tea.Cmd because hybrid retrieval may make a network request.
+func (m *Model) SetMemoryRetriever(r memory.Retriever) { m.memoryRetriever = r }
 
 // handleMemory implements /memory: with no argument it lists what is stored,
 // with one it searches. Output goes into the transcript so it scrolls and
@@ -43,11 +54,22 @@ func (m *Model) handleMemory(input string) (tea.Model, tea.Cmd) {
 	}
 	query := strings.TrimSpace(strings.TrimPrefix(input, "/memory"))
 
-	notes, err := m.memoryStore.Search(query, memoryListLimit)
+	retriever := m.memoryRetriever
+	if retriever == nil {
+		retriever = memory.LexicalRetriever{Store: m.memoryStore}
+	}
+	return m, func() tea.Msg {
+		notes, err := retriever.Search(context.Background(), query, memoryListLimit)
+		return memorySearchMsg{query: query, notes: notes, err: err}
+	}
+}
+
+func (m *Model) renderMemorySearch(msg memorySearchMsg) {
+	query, notes, err := msg.query, msg.notes, msg.err
 	if err != nil {
 		m.addBlock(errorStyle.Render("✗ memory: " + err.Error()))
 		m.refreshViewport()
-		return m, nil
+		return
 	}
 	if len(notes) == 0 {
 		if query == "" {
@@ -56,7 +78,7 @@ func (m *Model) handleMemory(input string) (tea.Model, tea.Cmd) {
 			m.addBlock(dimStyle.Render("no memories matched " + strconv.Quote(query)))
 		}
 		m.refreshViewport()
-		return m, nil
+		return
 	}
 
 	var b strings.Builder
@@ -71,7 +93,6 @@ func (m *Model) handleMemory(input string) (tea.Model, tea.Cmd) {
 	}
 	m.addBlock(dimStyle.Render(strings.TrimRight(b.String(), "\n")))
 	m.refreshViewport()
-	return m, nil
 }
 
 // memoryListLimit bounds how many notes /memory prints at once.

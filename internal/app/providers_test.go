@@ -13,17 +13,25 @@ import (
 	"github.com/wislist/mini-opencode/internal/config"
 )
 
-// loadConfig writes body as config.json in a temp dir and loads it, so the
-// tests exercise the same normalization path the app uses at startup.
+// loadConfig writes body to the isolated global config and loads it for a
+// separate workspace, so tests exercise the same merge path as startup.
 func loadConfig(t *testing.T, body string) (config.Config, string) {
 	t.Helper()
 	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
 	if body != "" {
-		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0644); err != nil {
+		path, err := config.GlobalConfigPath()
+		if err != nil {
+			t.Fatalf("global config path: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatalf("create global config dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 			t.Fatalf("write config: %v", err)
 		}
 	}
-	cfg, err := config.Load(filepath.Join(dir, "config.json"))
+	cfg, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -78,7 +86,7 @@ func TestApplyProviderCommandSwitches(t *testing.T) {
 		t.Fatalf("message should name the new provider: %q", res.Message)
 	}
 	// Nothing was persisted: reloading the file still selects the old provider.
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -129,7 +137,7 @@ func TestApplyProviderCommandAddPersistsAndActivates(t *testing.T) {
 	if cfg.Provider.Name != "backup" {
 		t.Fatalf("added provider is not active: %q", cfg.Provider.Name)
 	}
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -205,7 +213,7 @@ func TestApplyProviderCommandAddRejectsBadInput(t *testing.T) {
 func TestApplyModelCommandListsAndSwitches(t *testing.T) {
 	cfg, _ := loadConfig(t, twoProviders)
 
-	listing := applyModelCommand(&cfg, "/model")
+	listing := applyModelCommand(&cfg, t.TempDir(), "/model")
 	if listing.Changed {
 		t.Fatalf("listing changed state: %+v", listing)
 	}
@@ -215,7 +223,7 @@ func TestApplyModelCommandListsAndSwitches(t *testing.T) {
 		}
 	}
 
-	res := applyModelCommand(&cfg, "/model deepseek-chat")
+	res := applyModelCommand(&cfg, t.TempDir(), "/model deepseek-chat")
 	if !res.Changed {
 		t.Fatalf("switching model did not report a change: %+v", res)
 	}
@@ -233,7 +241,7 @@ func TestApplyModelCommandListsAndSwitches(t *testing.T) {
 func TestApplyModelCommandAcceptsUnlistedModel(t *testing.T) {
 	cfg, _ := loadConfig(t, twoProviders)
 
-	res := applyModelCommand(&cfg, "/model brand-new")
+	res := applyModelCommand(&cfg, t.TempDir(), "/model brand-new")
 	if !res.Changed {
 		t.Fatalf("unlisted model rejected: %+v", res)
 	}
@@ -249,7 +257,7 @@ func TestApplyModelCommandAcceptsUnlistedModel(t *testing.T) {
 func TestApplyModelCommandEchoAndUsage(t *testing.T) {
 	cfg, _ := loadConfig(t, `{"provider": {"name": "echo"}}`)
 
-	res := applyModelCommand(&cfg, "/model")
+	res := applyModelCommand(&cfg, t.TempDir(), "/model")
 	if res.Changed {
 		t.Fatalf("echo listing changed state: %+v", res)
 	}
@@ -259,12 +267,12 @@ func TestApplyModelCommandEchoAndUsage(t *testing.T) {
 
 	// A blank id is the bare command, not a usage error: trailing spaces are
 	// how a menu-driven flow lands back on the listing.
-	blank := applyModelCommand(&cfg, "/model   ")
+	blank := applyModelCommand(&cfg, t.TempDir(), "/model   ")
 	if blank.Changed || !strings.Contains(blank.Message, "echo") {
 		t.Fatalf("blank id should behave like the bare command, got %+v", blank)
 	}
 
-	tooMany := applyModelCommand(&cfg, "/model a b")
+	tooMany := applyModelCommand(&cfg, t.TempDir(), "/model a b")
 	if tooMany.Changed || !strings.Contains(tooMany.Message, "usage") {
 		t.Fatalf("two ids should print usage, got %+v", tooMany)
 	}
@@ -346,16 +354,12 @@ func TestConfigureProviderKeyStoresUnderActiveName(t *testing.T) {
 	if err := configureProviderKey(testScanner(t, ""), &out, dir, &cfg, "sk-new"); err != nil {
 		t.Fatalf("configureProviderKey: %v", err)
 	}
-	store, err := config.LoadSecretStore(dir)
-	if err != nil {
-		t.Fatalf("LoadSecretStore: %v", err)
+	if cfg.Provider.APIKey != "sk-new" {
+		t.Fatalf("active provider key = %q, want the key under relay", cfg.Provider.APIKey)
 	}
-	if store.ProviderKeys["relay"] != "sk-new" {
-		t.Fatalf("store = %+v, want the key under relay", store.ProviderKeys)
-	}
-	// The inline key is cleared so secrets.json is the single source, and the
-	// endpoint/model the user configured survive untouched.
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	// The global catalog is the single source, and the endpoint/model the user
+	// configured survive untouched.
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -363,8 +367,8 @@ func TestConfigureProviderKeyStoresUnderActiveName(t *testing.T) {
 	if relay.BaseURL != "https://relay.example.com/v1" || relay.Model != "gpt-4o" {
 		t.Fatalf("configureProviderKey rewrote the endpoint: %+v", relay)
 	}
-	if relay.APIKey != "" {
-		t.Fatalf("inline key kept in config.json: %q", relay.APIKey)
+	if relay.APIKey != "sk-new" {
+		t.Fatalf("persisted key = %q, want sk-new", relay.APIKey)
 	}
 }
 
@@ -378,22 +382,37 @@ func TestConfigureProviderKeyPromptsWhenEmpty(t *testing.T) {
 	if !strings.Contains(out.String(), "relay") {
 		t.Fatalf("prompt %q should name the provider being configured", out.String())
 	}
-	store, _ := config.LoadSecretStore(dir)
-	if store.ProviderKeys["relay"] != "sk-from-prompt" {
-		t.Fatalf("store = %+v", store.ProviderKeys)
+	reloaded, err := config.LoadWorkspace(dir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Provider.APIKey != "sk-from-prompt" {
+		t.Fatalf("persisted key = %q", reloaded.Provider.APIKey)
 	}
 }
 
 // Boundary: an empty answer must not silently store an empty key.
 func TestConfigureProviderKeyRejectsEmptyAnswer(t *testing.T) {
 	cfg, dir := loadConfig(t, twoProviders)
+	globalPath, err := config.GlobalConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var out strings.Builder
 	if err := configureProviderKey(testScanner(t, "\n"), &out, dir, &cfg, ""); err == nil {
 		t.Fatal("empty key accepted")
 	}
-	if _, err := config.LoadSecretStore(dir); err != nil {
-		t.Fatalf("secret store: %v", err)
+	after, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || cfg.Provider.APIKey != "sk-inline" {
+		t.Fatalf("empty answer changed provider config: key=%q", cfg.Provider.APIKey)
 	}
 }
 
@@ -430,16 +449,15 @@ func TestConfigureProviderKeyBootstrapsDeepSeek(t *testing.T) {
 	if cfg.Provider.BaseURL != "https://api.deepseek.com" || cfg.Provider.Model != "deepseek-chat" {
 		t.Fatalf("bootstrap provider = %+v", cfg.Provider)
 	}
-	store, _ := config.LoadSecretStore(dir)
-	if store.ProviderKeys["deepseek"] != "sk-first-run" {
-		t.Fatalf("store = %+v", store.ProviderKeys)
-	}
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 	if reloaded.Provider.Name != "deepseek" {
 		t.Fatalf("reloaded active provider = %q", reloaded.Provider.Name)
+	}
+	if reloaded.Provider.APIKey != "sk-first-run" {
+		t.Fatalf("reloaded key = %q", reloaded.Provider.APIKey)
 	}
 }
 
@@ -468,9 +486,12 @@ func TestEnsureProviderKey(t *testing.T) {
 		if err := ensureProviderKey(testScanner(t, "sk-prompted\n"), &out, dir, &cfg); err != nil {
 			t.Fatalf("ensureProviderKey: %v", err)
 		}
-		store, _ := config.LoadSecretStore(dir)
-		if store.ProviderKeys["relay"] != "sk-prompted" {
-			t.Fatalf("store = %+v", store.ProviderKeys)
+		reloaded, err := config.LoadWorkspace(dir)
+		if err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		if reloaded.Provider.APIKey != "sk-prompted" {
+			t.Fatalf("persisted key = %q", reloaded.Provider.APIKey)
 		}
 	})
 }
@@ -517,7 +538,7 @@ func TestApplyModelRefresh(t *testing.T) {
 				t.Fatalf("message %q should mention %q", res.Message, want)
 			}
 		}
-		reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+		reloaded, err := config.LoadWorkspace(dir)
 		if err != nil {
 			t.Fatalf("reload: %v", err)
 		}
@@ -617,7 +638,7 @@ func TestApplyModelRefreshStoresTheReportedWindow(t *testing.T) {
 	if !strings.Contains(res.Message, "窗口") {
 		t.Fatalf("message should mention the window: %q", res.Message)
 	}
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -681,5 +702,31 @@ func TestPrintStatusSkipsTheWindowForEcho(t *testing.T) {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("echo status %q should not mention %q", got, unwanted)
 		}
+	}
+}
+
+func TestModelContextCLI(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	cfg, err := config.LoadWorkspace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := applyModelCommand(&cfg, dir, "/model context 1M")
+	if !result.Changed || !result.Saved || cfg.Provider.ContextWindow != 1000000 {
+		t.Fatalf("result=%+v window=%d", result, cfg.Provider.ContextWindow)
+	}
+	loaded, err := config.LoadWorkspace(dir)
+	if err != nil || loaded.Provider.ContextWindow != 1000000 {
+		t.Fatalf("reload: %v", err)
+	}
+	result = applyModelCommand(&cfg, dir, "/model context")
+	if result.Changed || result.Saved || !strings.Contains(result.Message, "1000000") {
+		t.Fatalf("query: %+v", result)
+	}
+	result = applyModelCommand(&cfg, dir, "/model context -1")
+	if result.Changed || result.Saved || cfg.Provider.ContextWindow != 1000000 {
+		t.Fatalf("invalid: %+v", result)
 	}
 }

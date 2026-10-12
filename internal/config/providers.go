@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -456,10 +457,8 @@ func (c *Config) SetProviderContextWindow(name string, window int) (bool, error)
 }
 
 // KeySource reports where a provider's API key comes from, in the same
-// precedence the resolution uses: inline config, environment, local secret
-// store. It answers "why did switching to this provider fail" without the user
-// having to read two files.
-func (p ProviderConfig) KeySource(workingDir string) string {
+// precedence the resolution uses: inline global config, then environment.
+func (p ProviderConfig) KeySource() string {
 	if p.EffectiveType() == ProviderTypeEcho {
 		return "n/a"
 	}
@@ -468,11 +467,6 @@ func (p ProviderConfig) KeySource(workingDir string) string {
 	}
 	if p.APIKeyEnv != "" && strings.TrimSpace(os.Getenv(p.APIKeyEnv)) != "" {
 		return "env:" + p.APIKeyEnv
-	}
-	if store, err := LoadSecretStore(workingDir); err == nil {
-		if strings.TrimSpace(store.ProviderKeys[p.Name]) != "" {
-			return "secrets"
-		}
 	}
 	if p.APIKeyEnv != "" {
 		return "env:" + p.APIKeyEnv + " (未设置)"
@@ -483,7 +477,7 @@ func (p ProviderConfig) KeySource(workingDir string) string {
 // Summary renders one display row for a provider: display name, endpoint, the
 // active model and where its key comes from. Both front ends show the same row
 // so a provider looks the same in the CLI listing and in the picker.
-func (p ProviderConfig) Summary(workingDir string) string {
+func (p ProviderConfig) Summary() string {
 	parts := []string{p.DisplayName()}
 	if p.Name != p.DisplayName() {
 		parts = append(parts, "("+p.Name+")")
@@ -503,7 +497,7 @@ func (p ProviderConfig) Summary(workingDir string) string {
 		// "we do not know, tell us with context_window".
 		window += "（估）"
 	}
-	parts = append(parts, window, "key="+p.KeySource(workingDir))
+	parts = append(parts, window, "key="+p.KeySource())
 	return strings.Join(parts, "  ")
 }
 
@@ -530,8 +524,10 @@ type ProviderCommand struct {
 // ModelCommand is a parsed /model invocation.
 type ModelCommand struct {
 	// List is set when no model id was given.
-	List bool
-	ID   string
+	List    bool
+	ID      string
+	Context bool
+	Window  *int
 }
 
 // ParseProviderCommand parses a /provider command without touching state, so a
@@ -573,6 +569,34 @@ func ParseProviderCommand(input string) (ProviderCommand, error) {
 // them would break the command exactly where it is most useful.
 func ParseModelCommand(input string) (ModelCommand, error) {
 	args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(input, "/model")))
+	if len(args) > 0 && args[0] == "context" {
+		cmd := ModelCommand{Context: true}
+		if len(args) == 1 {
+			return cmd, nil
+		}
+		if len(args) != 2 {
+			return ModelCommand{}, fmt.Errorf("usage: /model context <tokens|1M|128K|auto>")
+		}
+		value := strings.ToLower(args[1])
+		window := 0
+		if value != "auto" {
+			multiplier := 1
+			if strings.HasSuffix(value, "k") {
+				multiplier = 1000
+				value = strings.TrimSuffix(value, "k")
+			} else if strings.HasSuffix(value, "m") {
+				multiplier = 1000000
+				value = strings.TrimSuffix(value, "m")
+			}
+			n, err := strconv.Atoi(value)
+			if err != nil || n <= 0 || n > int(^uint(0)>>1)/multiplier {
+				return ModelCommand{}, fmt.Errorf("上下文窗口须为正整数（支持 K/M），或 auto")
+			}
+			window = n * multiplier
+		}
+		cmd.Window = &window
+		return cmd, nil
+	}
 	switch len(args) {
 	case 0:
 		return ModelCommand{List: true}, nil
@@ -585,7 +609,7 @@ func ParseModelCommand(input string) (ModelCommand, error) {
 
 // ApplyProviderCommand mutates the configuration for a parsed command and
 // reports whether the active provider changed (the caller has to rebuild the
-// runtime) and whether config.json was rewritten.
+// runtime) and whether the global provider config was rewritten.
 //
 // Switching stays in memory: the file is the configuration, and a menu choice
 // is not. Adding writes it, because "add a provider" is a configuration change
@@ -606,7 +630,7 @@ func (c *Config) ApplyProviderCommand(cmd ProviderCommand, configPath string) (c
 		if err := c.AddProvider(ProviderConfig{Name: cmd.Name, BaseURL: cmd.URL, Model: cmd.Model}); err != nil {
 			return false, false, err
 		}
-		if err := Save(configPath, *c); err != nil {
+		if err := SaveProviderCatalog(configPath, *c); err != nil {
 			c.Providers, c.ActiveProvider, c.Provider = prevProviders, prevActive, prevResolved
 			return false, false, fmt.Errorf("写入 %s 失败：%w", configPath, err)
 		}
@@ -648,4 +672,29 @@ func IsAbsoluteHTTPURL(raw string) bool {
 		return false
 	}
 	return parsed.Host != ""
+}
+
+// ApplyModelContext saves a provider-scoped window before publishing the change.
+// Querying never writes. A failed save leaves both resolved and catalog state intact.
+func (c *Config) ApplyModelContext(cmd ModelCommand, path string) (bool, string, error) {
+	if !cmd.Context {
+		return false, "", fmt.Errorf("不是上下文设置命令")
+	}
+	if cmd.Window == nil {
+		return false, fmt.Sprintf("provider %s：上下文窗口 %d tokens（%s）；/model context <tokens|1M|128K|auto>", c.Provider.Name, c.Provider.EffectiveContextWindow(), c.Provider.ContextWindowSource()), nil
+	}
+	if *cmd.Window < 0 {
+		return false, "", fmt.Errorf("上下文窗口不能为负数")
+	}
+	next := *c
+	next.Providers = slices.Clone(c.Providers)
+	changed, err := next.SetProviderContextWindow(c.Provider.Name, *cmd.Window)
+	if err != nil {
+		return false, "", err
+	}
+	if err := SaveProviderCatalog(path, next); err != nil {
+		return false, "", fmt.Errorf("保存上下文窗口失败：%w", err)
+	}
+	*c = next
+	return changed, fmt.Sprintf("已保存 provider %s 的上下文窗口：%d tokens（%s）；该提供商所有模型共用，refresh 可更新窗口", c.Provider.Name, c.Provider.EffectiveContextWindow(), c.Provider.ContextWindowSource()), nil
 }

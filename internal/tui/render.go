@@ -629,7 +629,7 @@ func (m *Model) renderStatus() string {
 		if m.cfg.Provider.ContextWindowIsGuess() && m.cfg.Provider.EffectiveType() != config.ProviderTypeEcho {
 			// Say what to do about it, not just that it is a guess.
 			warning := fmt.Sprintf(
-				"  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：在 config.json 的 providers[].context_window 指定，或跑 /model refresh 从 /models 读取",
+				"  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：用 /model context <tokens> 设置 context_window，或跑 /model refresh 从 /models 读取",
 				formatTokens(window), m.cfg.Provider.Model)
 			for _, wl := range wrapLine(dimStyle.Render(warning), m.width) {
 				lines = append(lines, wl)
@@ -814,7 +814,7 @@ func (m *Model) renderMCPStatus() string {
 	lines := []string{toolName.Render("mcp:")}
 	statuses := m.mcpStatus()
 	if len(statuses) == 0 {
-		lines = append(lines, "  "+dimStyle.Render("no MCP servers configured (config.json -> mcpServers)"))
+		lines = append(lines, "  "+dimStyle.Render("no MCP servers configured (.mini-opencode/config.json -> mcpServers)"))
 	}
 	for _, status := range statuses {
 		for _, wl := range wrapLine("  "+status, max(1, m.width)) {

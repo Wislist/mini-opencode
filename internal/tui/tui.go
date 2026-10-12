@@ -219,7 +219,8 @@ type Model struct {
 	// disables automatic extraction.
 	memoryDistiller *memory.Distiller
 	// memoryStore backs the /memory command.
-	memoryStore *memory.Store
+	memoryStore     *memory.Store
+	memoryRetriever memory.Retriever
 	// streamRenderPending is set while a throttled repaint of the streaming
 	// assistant block is queued; see stream.go for why rendering is throttled.
 	streamRenderPending bool
@@ -612,16 +613,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, textinput.Blink)
 
 	case memoryDistilledMsg:
-		// Extraction is a background enhancement, so a failure is reported
-		// quietly rather than as an error the user must act on: the run they
-		// cared about already succeeded.
-		if msg.err != nil {
-			break
-		}
-		if msg.notes > 0 {
-			m.addBlock(toolArrow.Render(fmt.Sprintf("⟳ remembered %d note(s) for future sessions", msg.notes)))
-			m.refreshViewport()
-		}
+		// Extraction is a background implementation detail. Success and failure
+		// are both silent because neither changes the completed answer.
+
+	case memorySearchMsg:
+		m.renderMemorySearch(msg)
 
 	case sessionTitleMsg:
 		if msg.err == nil && msg.title != "" && m.currentSession != nil {

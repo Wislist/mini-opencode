@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,7 +30,7 @@ func TestCLIPermissionSwitchDoesNotPersistWithNameSave(t *testing.T) {
 	if err := Run(context.Background(), strings.NewReader("/permissions full-access confirm\n/name user Alice\n/quit\n"), &out); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(filepath.Join(dir, "config.json"))
+	cfg, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

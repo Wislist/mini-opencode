@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,7 +49,7 @@ func newProviderForm(width int) providerFormState {
 	form := providerFormState{
 		name: field("例如 relay"),
 		url:  field("https://relay.example.com/v1"),
-		key:  field("sk-...（留空则稍后用 /key 或 api_key_env 配置）"),
+		key:  field("sk-...（可留空，稍后用同名 /provider add 或 api_key_env 配置）"),
 	}
 	// The key is masked: a screen full of credentials survives screenshots,
 	// shoulder surfing and screen sharing far longer than it should.
@@ -356,7 +356,7 @@ func (m *Model) renderModelSelect() string {
 	if m.modelSelectErr != "" {
 		lines = append(lines, errorStyle.Render("! "+m.modelSelectErr))
 	} else {
-		lines = append(lines, dimStyle.Render("勾选的模型会写进 config.json 的 models，第一个勾选的成为当前 model。"))
+		lines = append(lines, dimStyle.Render("勾选的模型会写进全局 ~/.mini-opencode/config.json 的 models，第一个勾选的成为当前 model。"))
 	}
 	return sessionBox.Width(w).Render(strings.Join(m.wrapMenuRows(lines, inner, 1+(end-start)), "\n"))
 }
@@ -447,67 +447,69 @@ func (m *Model) closeModelSelect() (tea.Model, tea.Cmd) {
 // savePendingProvider persists whatever the flow collected: the provider entry,
 // its key, and the chosen models — then rebuilds so the switch takes effect.
 //
-// The order matters. The entry is validated and added first, then the models
-// are attached, then the key lands in secrets.json, and only then is the file
-// written: a partial failure leaves the in-memory catalog consistent with what
-// the next save will contain.
+// The complete provider entry is staged in a copy and written to the global
+// config before it replaces live state. A failed write leaves memory and disk
+// on the same catalog.
 func (m *Model) savePendingProvider(models []string) {
 	pending := m.pendingAdd
 	if pending == nil {
 		return
 	}
+	path, err := config.GlobalConfigPath()
+	if err != nil {
+		m.addBlock(errorStyle.Render("✗ 定位全局 config.json 失败：" + err.Error()))
+		m.refreshViewport()
+		return
+	}
+	next := *m.cfg
+	next.Providers = slices.Clone(m.cfg.Providers)
 	if pending.refresh {
-		if _, err := m.cfg.SetProviderModels(pending.name, models, ""); err != nil {
+		if _, err := next.SetProviderModels(pending.name, models, ""); err != nil {
 			m.addBlock(errorStyle.Render("✗ " + err.Error()))
 			m.refreshViewport()
 			return
 		}
-		if err := config.Save(m.configPath(), *m.cfg); err != nil {
-			m.addBlock(errorStyle.Render("✗ 写入 config.json 失败：" + err.Error()))
+		windowNote := m.applyFetchedWindowTo(&next, pending.name)
+		if err := config.SaveProviderCatalog(path, next); err != nil {
+			m.addBlock(errorStyle.Render("✗ 写入全局 ~/.mini-opencode/config.json 失败：" + err.Error()))
 			m.refreshViewport()
 			return
 		}
-		windowNote := m.applyFetchedWindow(pending.name)
+		*m.cfg = next
 		m.addBlock(toolArrow.Render(fmt.Sprintf("已更新 provider %s 的模型（%d 个）· 当前 %s%s",
 			pending.name, len(m.cfg.Provider.CatalogModels()), m.cfg.Provider.Model, windowNote)))
 		m.rebuildWithNotice()
 		return
 	}
 
-	entry := config.ProviderConfig{Name: pending.name, BaseURL: pending.url}
-	if err := m.cfg.AddProvider(entry); err != nil {
+	entry := config.ProviderConfig{Name: pending.name, BaseURL: pending.url, APIKey: pending.key}
+	if err := next.AddProvider(entry); err != nil {
 		m.addBlock(errorStyle.Render("✗ " + err.Error()))
 		m.refreshViewport()
 		return
 	}
-	if _, err := m.cfg.SetProviderModels(pending.name, models, ""); err != nil {
+	if _, err := next.SetProviderModels(pending.name, models, ""); err != nil {
 		m.addBlock(errorStyle.Render("✗ " + err.Error()))
 		m.refreshViewport()
 		return
 	}
-	windowNote := m.applyFetchedWindow(pending.name)
-	if pending.key != "" {
-		if err := config.SaveProviderKey(m.workingDir, pending.name, pending.key); err != nil {
-			m.addBlock(errorStyle.Render("✗ 保存密钥失败：" + err.Error()))
-			m.refreshViewport()
-			return
-		}
-	}
-	if err := config.Save(m.configPath(), *m.cfg); err != nil {
-		m.addBlock(errorStyle.Render("✗ 写入 config.json 失败：" + err.Error()))
+	windowNote := m.applyFetchedWindowTo(&next, pending.name)
+	if err := config.SaveProviderCatalog(path, next); err != nil {
+		m.addBlock(errorStyle.Render("✗ 写入全局 ~/.mini-opencode/config.json 失败：" + err.Error()))
 		m.refreshViewport()
 		return
 	}
+	*m.cfg = next
 
 	switch {
 	case pending.key == "" && len(models) == 0:
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s（已验证并写入 config.json）",
+		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s（已验证并写入全局 ~/.mini-opencode/config.json）",
 			pending.name, pending.url)))
 		m.addBlock(dimStyle.Render("未填密钥，因此没有拉取模型：设置 api_key_env，或用 /provider add 以同名提供商补上密钥（第三个框），再用 /model refresh 拉取。"))
 	case len(models) == 0:
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s（已验证并写入 config.json）",
+		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s（已验证并写入全局 ~/.mini-opencode/config.json）",
 			pending.name, pending.url)))
-		m.addBlock(dimStyle.Render("该地址没有返回任何模型：用 /model <id> 指定，或在 config.json 的 models 里列出。"))
+		m.addBlock(dimStyle.Render("该地址没有返回任何模型：用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出。"))
 	default:
 		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s，模型 %d 个，当前 %s%s",
 			pending.name, pending.url, len(m.cfg.Provider.CatalogModels()), m.cfg.Provider.Model, windowNote)))
@@ -522,7 +524,11 @@ func (m *Model) savePendingProvider(models []string) {
 // hand-set window because a listing omitted the field would silently undo the
 // user's own configuration.
 func (m *Model) applyFetchedWindow(providerName string) string {
-	model := m.cfg.Provider.Model
+	return m.applyFetchedWindowTo(m.cfg, providerName)
+}
+
+func (m *Model) applyFetchedWindowTo(cfg *config.Config, providerName string) string {
+	model := cfg.Provider.Model
 	if model == "" {
 		return ""
 	}
@@ -530,7 +536,7 @@ func (m *Model) applyFetchedWindow(providerName string) string {
 	if window <= 0 {
 		return ""
 	}
-	changed, err := m.cfg.SetProviderContextWindow(providerName, window)
+	changed, err := cfg.SetProviderContextWindow(providerName, window)
 	if err != nil || !changed {
 		return ""
 	}
@@ -550,12 +556,12 @@ func (m *Model) refreshModels() (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
-	key := m.cfg.Provider.ResolvedAPIKeyFrom(m.workingDir)
+	key := m.cfg.Provider.ResolvedAPIKey()
 	if key == "" {
 		// The env var may be unset, so name the field rather than an empty
 		// string: "设置 " with nothing after it reads as a bug.
 		m.addBlock(errorStyle.Render(fmt.Sprintf(
-			"provider %q 还没有可用的密钥：用 /provider add 以同名提供商补上（第三个框写密钥），或在 config.json 里填 api_key / api_key_env。",
+			"provider %q 还没有可用的密钥：用 /provider add 以同名提供商补上（第三个框写密钥），或在全局 ~/.mini-opencode/config.json 里填 api_key / api_key_env。",
 			m.cfg.Provider.Name)))
 		m.refreshViewport()
 		return m, nil
@@ -565,4 +571,7 @@ func (m *Model) refreshModels() (tea.Model, tea.Cmd) {
 }
 
 // modelFetchTimeout bounds a provider request from the picker.
-func (m *Model) configFilePath() string { return filepath.Join(m.workingDir, "config.json") }
+func (m *Model) configFilePath() string {
+	path, _ := config.GlobalConfigPath()
+	return path
+}

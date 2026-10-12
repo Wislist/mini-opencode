@@ -16,6 +16,7 @@ import (
 )
 
 func TestRunBannerReportsTheVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	var out bytes.Buffer
 	in := strings.NewReader("/quit\n")
 

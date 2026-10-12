@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -29,6 +28,7 @@ type Config struct {
 	Workspace      WorkspaceConfig            `json:"workspace"`
 	Web            WebConfig                  `json:"web"`
 	Agent          AgentConfig                `json:"agent"`
+	Memory         MemoryConfig               `json:"memory"`
 	Permissions    PermissionsConfig          `json:"permissions"`
 	// User and Assistant are the display names shown in the TUI message
 	// labels. Defaults are applied in Load when empty.
@@ -38,6 +38,51 @@ type Config struct {
 
 type PermissionsConfig struct {
 	Mode agent.PermissionMode `json:"mode"`
+}
+
+// MemoryConfig controls optional semantic retrieval over durable Markdown
+// notes. The provider name points into Config.Providers; the chat provider and
+// embedding provider may therefore be different services.
+type MemoryConfig struct {
+	Retrieval         string  `json:"retrieval,omitempty"`
+	EmbeddingProvider string  `json:"embedding_provider,omitempty"`
+	EmbeddingModel    string  `json:"embedding_model,omitempty"`
+	TopK              int     `json:"top_k,omitempty"`
+	CandidateK        int     `json:"candidate_k,omitempty"`
+	MaxTokens         int     `json:"max_tokens,omitempty"`
+	MinSimilarity     float64 `json:"min_similarity,omitempty"`
+}
+
+func (c MemoryConfig) HybridEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Retrieval), "hybrid")
+}
+
+func (c MemoryConfig) EffectiveTopK() int {
+	if c.TopK > 0 {
+		return c.TopK
+	}
+	return 3
+}
+
+func (c MemoryConfig) EffectiveCandidateK() int {
+	if c.CandidateK > 0 {
+		return c.CandidateK
+	}
+	return 12
+}
+
+func (c MemoryConfig) EffectiveMaxTokens() int {
+	if c.MaxTokens > 0 {
+		return c.MaxTokens
+	}
+	return 1600
+}
+
+func (c MemoryConfig) EffectiveMinSimilarity() float64 {
+	if c.MinSimilarity > 0 && c.MinSimilarity <= 1 {
+		return c.MinSimilarity
+	}
+	return 0.35
 }
 
 type ProviderConfig struct {
@@ -204,10 +249,6 @@ func (c MCPServerConfig) Timeout() time.Duration {
 	return time.Duration(c.TimeoutSeconds) * time.Second
 }
 
-type SecretStore struct {
-	ProviderKeys map[string]string `json:"provider_keys"`
-}
-
 func Default() Config {
 	return Config{
 		Provider:    ProviderConfig{Name: "echo"},
@@ -242,13 +283,20 @@ func Load(path string) (Config, error) {
 	default:
 		return cfg, err
 	}
+	if err := normalizeConfig(&cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+func normalizeConfig(cfg *Config) error {
 	mode, err := agent.ParsePermissionMode(string(cfg.Permissions.Mode))
 	if err != nil {
-		return cfg, err
+		return err
 	}
 	cfg.Permissions.Mode = mode
 	if err := cfg.normalizeProviders(); err != nil {
-		return cfg, err
+		return err
 	}
 	if cfg.MCPServers == nil {
 		cfg.MCPServers = map[string]MCPServerConfig{}
@@ -260,7 +308,7 @@ func Load(path string) (Config, error) {
 		cfg.Assistant = "assistant"
 	}
 	cfg.Workspace.AllowedRoots = normalizeAllowedRoots(cfg.Workspace.AllowedRoots)
-	return cfg, nil
+	return nil
 }
 
 // normalizeAllowedRoots resolves each root to an absolute, cleaned path and
@@ -288,12 +336,24 @@ func normalizeAllowedRoots(roots []string) []string {
 }
 
 func Save(path string, cfg Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err := cfg.normalizeProviders(); err != nil {
+		return err
+	}
+	// Provider is a runtime projection and a legacy input field only. Shadow
+	// it when saving so the catalog is the single persisted source of truth.
+	type configJSON Config
+	data, err := json.MarshalIndent(struct {
+		*configJSON
+		Provider *ProviderConfig `json:"provider,omitempty"`
+	}{configJSON: (*configJSON)(&cfg)}, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0644)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
 }
 
 func (c ProviderConfig) ResolvedAPIKey() string {
@@ -324,62 +384,4 @@ func DefaultContextWindow(model string) int {
 		return window
 	}
 	return guessContextWindow
-}
-
-func (c ProviderConfig) ResolvedAPIKeyFrom(workDir string) string {
-	if key := c.ResolvedAPIKey(); key != "" {
-		return key
-	}
-	store, err := LoadSecretStore(workDir)
-	if err != nil {
-		return ""
-	}
-	return store.ProviderKeys[c.Name]
-}
-
-func LoadSecretStore(workDir string) (SecretStore, error) {
-	store := SecretStore{ProviderKeys: map[string]string{}}
-	data, err := os.ReadFile(secretStorePath(workDir))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return store, nil
-		}
-		return store, err
-	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return store, nil
-	}
-	if err := json.Unmarshal(data, &store); err != nil {
-		return store, err
-	}
-	if store.ProviderKeys == nil {
-		store.ProviderKeys = map[string]string{}
-	}
-	return store, nil
-}
-
-func SaveProviderKey(workDir string, providerName string, key string) error {
-	store, err := LoadSecretStore(workDir)
-	if err != nil {
-		return err
-	}
-	if store.ProviderKeys == nil {
-		store.ProviderKeys = map[string]string{}
-	}
-	store.ProviderKeys[providerName] = key
-
-	path := secretStorePath(workDir)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0600)
-}
-
-func secretStorePath(workDir string) string {
-	return filepath.Join(workDir, ".mini-opencode", "secrets.json")
 }

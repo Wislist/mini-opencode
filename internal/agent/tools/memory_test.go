@@ -10,6 +10,18 @@ import (
 	"github.com/wislist/mini-opencode/internal/memory"
 )
 
+type memoryRetrieverStub struct {
+	notes []memory.Note
+	query string
+	limit int
+}
+
+func (r *memoryRetrieverStub) Search(_ context.Context, query string, limit int) ([]memory.Note, error) {
+	r.query = query
+	r.limit = limit
+	return r.notes, nil
+}
+
 func newTestMemoryTool(t *testing.T) (*MemoryTool, *memory.Store) {
 	t.Helper()
 	store := memory.NewStore(t.TempDir())
@@ -178,5 +190,26 @@ func TestMemoryRecallSection(t *testing.T) {
 	}
 	if got := MemoryRecallSection(store, "completely unrelated zzzz", 3); got != "" {
 		t.Fatalf("unmatched query produced a section: %q", got)
+	}
+}
+
+func TestMemoryToolAndRecallUseInjectedRetriever(t *testing.T) {
+	store := memory.NewStore(t.TempDir())
+	retriever := &memoryRetrieverStub{notes: []memory.Note{{Name: "semantic", Title: "Semantic hit", Body: "recalled by vectors"}}}
+	tool := NewMemoryTool(MemoryOptions{Store: store, Retriever: retriever, DefaultLimit: 2})
+	if tool == nil {
+		t.Fatal("NewMemoryTool() returned nil")
+	}
+	out, err := tool.Run(context.Background(), agent.ToolInput{Arguments: json.RawMessage(`{"action":"search","query":"different words"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Content, "Semantic hit") || retriever.query != "different words" || retriever.limit != 2 {
+		t.Fatalf("tool output = %q, retriever = %#v", out.Content, retriever)
+	}
+
+	section := MemoryRecallSectionWithRetriever(context.Background(), retriever, "prompt query", 3)
+	if !strings.Contains(section, "Semantic hit") || retriever.query != "prompt query" || retriever.limit != 3 {
+		t.Fatalf("section = %q, retriever = %#v", section, retriever)
 	}
 }
