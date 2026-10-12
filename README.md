@@ -4,7 +4,8 @@
 
 本项目不依赖仓库里已有的 `02-llmg`、`03-mini-opencode` 或其它历史实现。
 
-> 目标平台为 macOS，暂不考虑 Linux/Windows 适配。Shell 通过系统 `bash -lc` 执行。
+> 正式支持 macOS 与 Windows 10/11（推荐 Windows Terminal + PowerShell 7）。命令工具在
+> macOS 使用 `bash -lc`，在 Windows 优先使用 `pwsh.exe`，并回退到系统 `powershell.exe`。
 
 ## 目标
 
@@ -20,6 +21,11 @@
 
 ## 当前阶段
 
+配置分成两层：provider、模型、上下文窗口与 API key 只保存在全局
+`~/.mini-opencode/config.json`；普通项目设置可由 `<project>/.mini-opencode/config.json`
+覆盖。项目配置中的 `provider` / `providers` / `active_provider` 会被忽略，旧的项目根
+`config.json` 与 `secrets.json` 不再读取或写入。
+
 - 独立 `go.mod` 与入口 `cmd/mini-opencode`
 - 标准库 CLI 壳（非终端 stdin）与 Bubble Tea TUI（终端）
 - `internal/agent` runtime：turn loop、event stream、hook 链、usage 累计
@@ -30,10 +36,10 @@
 - 权限：完全信任 / 替我审核 / 请求批准三种模式、会话级 always-allow、写操作 diff 预览
 - 多 provider：`providers` 目录（自定义名称/端点/模型列表/密钥，第三方中转开箱可用）、
   `/provider` 与 `/model` 浮层切换（仅本次进程生效）、切换时通过 `AdoptStateFrom` 保住对话；
-  旧的单 `provider` 块继续可用
+  配置统一保存为 `providers` + `active_provider`，旧单项格式仅保留读取迁移
 - 新增供应商流程（TUI）：`/provider add` 三框表单（名称/地址/密钥，密钥遮罩）→ 向该地址请求
   `/models` **主动拉取全部模型**（含厂商上报的上下文窗口，自动写进 `context_window`）
-  → 多选勾选（默认全选）→ 写入 `config.json` 并立即切换；
+  → 多选勾选（默认全选）→ 写入全局 `~/.mini-opencode/config.json` 并立即切换；
   校验或拉取失败退回表单且保留已填内容，任何一步 `esc` 都不会落盘。`/model refresh`
   对当前 provider 做同样的拉取（列表为已配置 ∪ 拉回的并集）
 - Plan 模式闭环：只读约束 + `exit_plan_mode` 提交 + 审批后继续实现
@@ -41,12 +47,14 @@
 - todo 面板：只在有未完成项时显示（完成后自动消失），`ctrl+t` 手动显隐，窄/矮终端下自动收缩不溢出
 - run 级重试：整轮 provider 失败自动重试，transcript 不丢、工具不重复执行
 - 上下文窗口：三级来源（显式 `context_window` → 内置模型表 → 占位猜测 8192），**猜测值在
-  header / `/status` / `/provider` 里标成「估值」**，并提供两条修复路径（手填或 `/model refresh`
-  从 `/models` 自动读）
+  header / `/status` / `/provider` 里标成「估值」**，可在 `/model` 菜单按 `c` 设置，或直接执行 `/model context 1M` 保存并立即生效；也可 `/model refresh`
+  从 `/models` 自动读
 - 上下文压缩：按剩余余量触发（crush 式阈值）；**非破坏性**——摘要追加并标记，原文保留在
   内存与 SQLite，只在发给 provider 时截断；压缩时把 todo 列表并入总结指令
-- 会话检索：FTS5 全文索引 `messages`，触发器随写同步，可搜索历史会话- 跨会话记忆：`.mini-opencode/memory/*.md`（人类可读可编辑），`memory` 工具主动写入 +
-  run 结束后台自动提炼；召回按相关性只注入前 3 条，`/memory` 查看
+- 会话检索：FTS5 全文索引 `messages`，触发器随写同步，可搜索历史会话
+- 跨会话记忆：`.mini-opencode/memory/*.md`（人类可读可编辑），`memory` 工具主动写入 +
+  run 结束后台自动提炼；默认词面召回，可选 OpenAI-compatible embedding + RRF 混合检索，
+  失败自动降级，索引只是可重建缓存；只注入前 3 条，`/memory` 查看
 - MCP：`stdio` + `http`（streamable HTTP，含 `Mcp-Session-Id`）+ `sse`（legacy HTTP+SSE）
   三种传输，`headers`/`token`/`token_env` 鉴权，工具以 `<server>__<tool>` 注册、`/mcp` 查看状态
 - 会话：SQLite 持久化、message parts、归档、todos、token 统计、`parent_session_id` 分支（`/fork`）
@@ -67,7 +75,7 @@ internal/memory       跨会话记忆（Markdown 笔记、自动提炼、按需�
 internal/skills       Skill 存取与安装（curated/local/GitHub）
 internal/tui          Bubble Tea 界面
 internal/diffutil     权限提示用的行级 diff
-internal/config       config.json / secrets.json
+internal/config       全局 ~/.mini-opencode/config.json + 项目 .mini-opencode/config.json
 docs/commands.md      斜杠命令与权限交互
 docs/mcp.md           MCP 接入说明
 docs/prompt.md        Prompt 组装说明
@@ -80,6 +88,29 @@ docs/memory.md        跨会话记忆（文件格式、自动提炼、召回策�
 
 ## 运行
 
+### 从 npm / pnpm 安装
+
+npm 与 pnpm 使用同一个 npm Registry，不需要分别发布两次。安装公开包：
+
+```bash
+npm install --global @wislist/mini-opencode
+# 或
+pnpm add --global @wislist/mini-opencode
+
+mini-opencode
+```
+
+安装包会根据当前系统只下载对应的原生二进制。目前发布 macOS 与 Windows 10/11 的
+arm64、x64 版本；安装时不要关闭 optional dependencies。Node.js 仅作为轻量启动器，
+最终运行的是 Go 编译出的 `mini-opencode`。
+
+无作用域的 `mini-opencode` 包名已被占用，因此本项目使用
+`@wislist/mini-opencode`；全局命令仍叫 `mini-opencode`。
+
+### 从源码运行
+
+macOS：
+
 ```bash
 make run          # 带 git 版本号跑 TUI
 make build        # 构建到 bin/mini-opencode
@@ -89,9 +120,22 @@ make help         # 全部目标
 go run ./cmd/mini-opencode   # 也可以直接跑，版本号用源码兜底值
 ```
 
+Windows PowerShell：
+
+```powershell
+go run ./cmd/mini-opencode
+./scripts/build.ps1           # 构建到 bin/mini-opencode.exe，并注入 git 版本号
+go test ./...
+```
+
+Windows 下推荐使用 Windows Terminal 与 PowerShell 7；未安装 `pwsh.exe` 时会自动使用
+Windows PowerShell 5.1。PowerShell 5.1 不支持 `&&`，工具提示会要求使用 `;` 和
+`$LASTEXITCODE`。项目不通过 `cmd.exe` 二次包装命令。
+
 ## 版本号
 
-`make build` 用 git 信息自动注入版本号，不需要手动维护：
+`make build`（macOS）和 `scripts/build.ps1`（Windows）都用 git 信息自动注入版本号，
+不需要手动维护：
 
 | 状态 | 报告的版本 |
 | --- | --- |
@@ -100,8 +144,63 @@ go run ./cmd/mini-opencode   # 也可以直接跑，版本号用源码兜底值
 | 没有任何 tag | `0.5.0-dev.g<sha>` |
 | 工作区有未提交改动 | 追加 `-dirty` |
 
-基线版本只在 `internal/app/app.go` 定义一处，`scripts/version.sh` 从那里读取，所以
-**改版本号只需要改那一行**。发版：改 base → `make tag`。
+基线版本只在 `internal/app/app.go` 定义一处，两套构建脚本都从那里读取，所以
+**改版本号只需要改那一行**。发版代码先进入 `main`，再由 `main` 合并到 `release`，最后
+只在 `release` 最新提交上创建 tag。
+
+### 发布 npm 版本
+
+GitHub Actions 在推送 `v<版本>` tag 时构建并发布以下公开包：
+
+- `@wislist/mini-opencode`
+- `@wislist/mini-opencode-darwin-arm64`
+- `@wislist/mini-opencode-darwin-x64`
+- `@wislist/mini-opencode-win32-arm64`
+- `@wislist/mini-opencode-win32-x64`
+
+发布前需要确认 npm 账号或组织拥有 `@wislist` 作用域。由于 npm 只允许为已经存在的包配置
+Trusted Publisher，第一次发布需要在名为 `npm` 的 GitHub Environment 中临时添加 granular
+access token secret：`NPM_TOKEN`。创建 token 时给 `@wislist` scope 设置
+`Read and write (publish and stage)`，开启 `Bypass 2FA`，并设置尽可能短的有效期；不要把
+token 写进仓库文件。这个 token 只用于创建上述五个包，首发完成后立即删除。
+
+首发完成后，在 npm 的每个包设置中分别配置 GitHub Actions Trusted Publisher：
+
+```text
+Organization or user: Wislist
+Repository:           mini-opencode
+Workflow filename:    npm-release.yml
+Environment name:     npm
+Allowed actions:      npm publish
+```
+
+五个包都配置完成后删除 GitHub Environment 中的 `NPM_TOKEN`。后续 workflow 使用 OIDC
+短期凭据发布并生成 provenance，不再保存长期写 token。Trusted Publisher 新建后应在两天内
+完成第一次成功发布，否则 npm 会让该配置过期，需要删除后重建。
+
+完成首发认证配置后执行：
+
+```bash
+# 在 main 上修改 internal/app/app.go 的基线版本并提交
+make check
+git push origin main
+
+# release 只接收 main；没有 release 专属提交时保持快进历史
+git switch release
+git merge --ff-only main
+git push origin release
+
+# 当前仓库已存在 v0.5.0，下一版必须使用新的版本号，例如 v0.5.1
+make tag
+git push origin v0.5.1
+```
+
+tag 指向的提交必须在远端 `release` 历史中，并且版本必须与 `internal/app/app.go` 完全一致，
+否则发布任务会拒绝执行。`.github/workflows/release-guard.yml` 会拒绝非 `main → release` 的
+PR；还需要在 GitHub Ruleset 中要求 `release` 必须通过 PR 更新、禁止直接 push，并把
+`Only main can update release` 设为 required check。平台包会先发布，最后发布主包装包，
+避免用户安装到依赖尚未就绪的版本。流水线会跳过已经存在的同版本包，因此平台包发布到
+一半后也可以重新运行对应 workflow。
 
 
 ## Workspace 访问范围
@@ -113,7 +212,7 @@ CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时
 | 命令 | 模式 | 行为 |
 | --- | --- | --- |
 | `/permissions ask` | 请求批准（默认） | 保留现有 deny/confirm 策略；危险工具弹出人工审批。 |
-| `/permissions auto-review` | 替我审核 | 保守本地规则自动批准范围内的 `write`/`edit`，及精确命令 `pwd`、`/bin/pwd`、`/bin/ls`；其他需审批工具仍交给用户。不是模型审核器。 |
+| `/permissions auto-review` | 替我审核 | 保守本地规则自动批准范围内的 `write`/`edit`，及平台对应的精确只读目录命令：macOS 为 `pwd`、`/bin/pwd`、`/bin/ls`，Windows 为 `Get-Location`、`pwd`、`Get-ChildItem`、`dir`；其他需审批工具仍交给用户。不是模型审核器。 |
 | `/permissions full-access confirm` | 完全信任 | 解除主 agent 文件工具的工作区限制、跳过逐次审批及旧命令黑名单；仍受安全 Hook、plan 模式、先读后写与系统账户权限约束。 |
 
 只输入 `/permissions full-access` 会显示风险提示，不会启用。模式切换仅对本次进程有效，
@@ -126,13 +225,13 @@ CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时
 
 未知模式会报错，未配置时使用 `ask`。显式配置 `full-access` 表示已同意在启动时启用，不再二次提示。
 
-**这些是应用层审批机制，不是操作系统沙箱。** `bash -lc` 包括 shell 启动文件会以当前账户权限运行；
+**这些是应用层审批机制，不是操作系统沙箱。** 平台 Shell 会以当前账户权限运行；
 命令字符串里的路径和网络行为没有系统级隔离。Web 工具沿用只读免审批行为，MCP 依据其工具行为声明审批；
 只读 `task` 子 agent 仍限制在原工作区与 allowed roots 内。不要将模式名称理解为与 Codex 安全能力完全等价。
 
 ### 配置文件工具的允许目录
 
-默认情况下内置文件工具只能读写启动时所在的工作目录（完全访问模式除外）。如果从子目录启动又需要访问整个项目，可以在 `config.json` 里配置 `workspace.allowed_roots`：
+默认情况下内置文件工具只能读写启动时所在的工作目录（完全访问模式除外）。如果从子目录启动又需要访问整个项目，可以在项目配置 `<project>/.mini-opencode/config.json` 里配置 `workspace.allowed_roots`：
 
 ```json
 {
@@ -142,7 +241,10 @@ CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时
 }
 ```
 
-`allowed_roots` 中的路径（绝对路径或相对当前工作目录）会被规范化为绝对路径并去重，agent 在权限校验和文件工具中都会把这些目录视为可访问范围（该列表只存在于 `config.json` 里）。
+Windows 路径在 JSON 中需要转义反斜杠，例如
+`"allowed_roots": ["D:\\work\\LLM-Learn"]`。
+
+`allowed_roots` 中的路径（绝对路径或相对当前工作目录）会被规范化为绝对路径并去重，agent 在权限校验和文件工具中都会把这些目录视为可访问范围（该列表属于项目配置，不会改写全局 provider 目录）。
 
 同一节点还控制改文件前的观察策略：
 
@@ -156,11 +258,12 @@ CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时
 
 ## 上下文预算
 
-对话接近 `provider.context_window` 时 runtime 会自动压缩（默认阈值 0.85），打印 `context auto-compacted` 后继续跑；单次 run 的 turn 预算由 `agent.max_turns` 控制（默认 100），打满时给出可操作的提示而不是静默失败。
+对话接近 `providers[].context_window` 时 runtime 会自动压缩（默认阈值 0.85），打印 `context auto-compacted` 后继续跑；单次 run 的 turn 预算由 `agent.max_turns` 控制（默认 100），打满时给出可操作的提示而不是静默失败。
 
 ```json
 {
-  "provider": { "context_window": 128000 },
+  "providers": [{ "name": "deepseek", "model": "deepseek-chat", "api_key_env": "DEEPSEEK_API_KEY", "context_window": 128000 }],
+  "active_provider": "deepseek",
   "agent": { "max_turns": 200, "compact_threshold": 0.85 }
 }
 ```

@@ -3,7 +3,6 @@ package app
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -71,27 +70,22 @@ func TestMCPServerConfigsEdgeCases(t *testing.T) {
 }
 
 // A configured provider without a key must not lock the user out of the TUI:
-// the interface opens on echo and the notice names the repair command.
+// the interface opens on echo without injecting a startup notice.
 func TestStartRuntimeFallsBackToEchoWithoutKey(t *testing.T) {
 	cfg, dir := loadConfig(t, `{
 	  "providers": [{"name": "relay", "base_url": "https://relay.example.com/v1", "model": "gpt-4o"}]
 	}`)
 	model := tui.New(&cfg, dir, "test")
 
-	rt, notice, err := startRuntime(dir, &cfg, model, runtimeExtras{})
+	rt, err := startRuntime(dir, &cfg, model, runtimeExtras{})
 	if err != nil {
 		t.Fatalf("startRuntime: %v", err)
 	}
 	if rt == nil {
 		t.Fatal("no runtime returned")
 	}
-	for _, want := range []string{"relay", "api key is required", "/provider add"} {
-		if !strings.Contains(notice, want) {
-			t.Fatalf("notice %q should mention %q", notice, want)
-		}
-	}
 	// The configuration still points at the provider the user chose, so the
-	// follow-up /key stores the key under the right name.
+	// follow-up /provider add stores the key under the right name.
 	if cfg.Provider.Name != "relay" {
 		t.Fatalf("startup fallback rewrote the config: %q", cfg.Provider.Name)
 	}
@@ -103,15 +97,12 @@ func TestStartRuntimeUsesTheConfiguredProvider(t *testing.T) {
 	}`)
 	model := tui.New(&cfg, dir, "test")
 
-	rt, notice, err := startRuntime(dir, &cfg, model, runtimeExtras{})
+	rt, err := startRuntime(dir, &cfg, model, runtimeExtras{})
 	if err != nil {
 		t.Fatalf("startRuntime: %v", err)
 	}
 	if rt == nil {
 		t.Fatal("no runtime returned")
-	}
-	if notice != "" {
-		t.Fatalf("unexpected notice: %q", notice)
 	}
 }
 
@@ -140,13 +131,14 @@ func TestLiveProviderFollowsTheConfig(t *testing.T) {
 // A config.json that is not writable must fail loudly rather than pretend the
 // provider was added.
 func TestApplyProviderCommandReportsWriteFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can write to a read-only directory")
-	}
 	cfg, dir := loadConfig(t, twoProviders)
-	// Force the write to fail by pointing at a path whose parent is a file.
-	blocked := filepath.Join(dir, "config.json", "nested")
-	res := applyProviderCommand(&cfg, blocked, "/provider add backup https://backup.example.com/v1")
+	// Force the global write to fail by making HOME itself a regular file.
+	blockedHome := filepath.Join(dir, "blocked-home")
+	if err := os.WriteFile(blockedHome, []byte("blocked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	setTestHome(t, blockedHome)
+	res := applyProviderCommand(&cfg, dir, "/provider add backup https://backup.example.com/v1")
 	if res.Changed || res.Saved {
 		t.Fatalf("failed write reported as success: %+v", res)
 	}

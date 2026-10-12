@@ -51,10 +51,15 @@ func TestSafetyHookAllowsSafeCommand(t *testing.T) {
 }
 
 func TestSafetyHookDeniesWorkspaceRootWrite(t *testing.T) {
-	h := NewSafetyHook("/repo")
+	workDir := t.TempDir()
+	h := NewSafetyHook(workDir)
+	args, err := json.Marshal(map[string]string{"path": workDir})
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := h.BeforeToolCall(context.Background(), ToolCall{
 		Name:      "write",
-		Arguments: json.RawMessage(`{"path":"/repo"}`),
+		Arguments: args,
 	}, ToolDefinition{})
 	if d.Action != HookDeny {
 		t.Fatalf("action = %q", d.Action)

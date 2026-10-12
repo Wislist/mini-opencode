@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -219,7 +218,7 @@ func TestModelSelectTogglesAndConfirms(t *testing.T) {
 
 	// The provider and its key are persisted: a form that forgets the key would
 	// leave a provider nobody can use.
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -230,12 +229,8 @@ func TestModelSelectTogglesAndConfirms(t *testing.T) {
 	if strings.Join(added.CatalogModels(), ",") != "m1,m3" {
 		t.Fatalf("persisted models = %v", added.CatalogModels())
 	}
-	store, err := config.LoadSecretStore(dir)
-	if err != nil {
-		t.Fatalf("LoadSecretStore: %v", err)
-	}
-	if store.ProviderKeys["backup"] != "sk-backup" {
-		t.Fatalf("key store = %+v, want the typed key", store.ProviderKeys)
+	if added.APIKey != "sk-backup" {
+		t.Fatalf("persisted key = %q, want the typed key", added.APIKey)
 	}
 	joined := strings.Join(m.blocks, "\n")
 	if !strings.Contains(joined, "backup") {
@@ -294,8 +289,12 @@ func TestModelSelectRejectsEmptySelection(t *testing.T) {
 	if *calls != 0 {
 		t.Fatal("runtime rebuilt without a model")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {
-		t.Fatal("config.json written despite an empty selection")
+	globalPath, err := config.GlobalConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
+		t.Fatalf("global config written despite an empty selection: %v", err)
 	}
 	if !strings.Contains(plainText(m.renderModelSelect()), "至少") {
 		t.Fatalf("no explanation shown:\n%s", plainText(m.renderModelSelect()))
@@ -329,12 +328,12 @@ func TestModelSelectEscDiscardsTheAdd(t *testing.T) {
 	if *calls != 0 {
 		t.Fatal("runtime rebuilt on cancel")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {
-		t.Fatal("config.json written on cancel")
+	globalPath, err := config.GlobalConfigPath()
+	if err != nil {
+		t.Fatal(err)
 	}
-	store, _ := config.LoadSecretStore(dir)
-	if store.ProviderKeys["backup"] != "" {
-		t.Fatal("key stored on cancel")
+	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
+		t.Fatalf("global config written on cancel: %v", err)
 	}
 }
 
@@ -456,7 +455,7 @@ func TestProviderFormEmptyKeySavesWithoutFetching(t *testing.T) {
 	if cfg.Provider.Name != "backup" {
 		t.Fatalf("active provider = %q", cfg.Provider.Name)
 	}
-	if _, err := config.Load(filepath.Join(dir, "config.json")); err != nil {
+	if _, err := config.LoadWorkspace(dir); err != nil {
 		t.Fatalf("config.json not written: %v", err)
 	}
 	if joined := strings.Join(m.blocks, "\n"); !strings.Contains(joined, "api_key_env") {
@@ -641,7 +640,7 @@ func TestModelRefreshConfirmPersists(t *testing.T) {
 	if cfg.Provider.Model != "gpt-4o" {
 		t.Fatalf("active model = %q, want the still-offered gpt-4o kept", cfg.Provider.Model)
 	}
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -915,7 +914,7 @@ func TestFetchedWindowIsSavedWithTheProvider(t *testing.T) {
 	if cfg.Provider.ContextWindowSource() != config.ContextWindowSourceConfig {
 		t.Fatalf("source = %q, want config", cfg.Provider.ContextWindowSource())
 	}
-	reloaded, err := config.Load(filepath.Join(dir, "config.json"))
+	reloaded, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}

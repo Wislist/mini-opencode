@@ -35,20 +35,26 @@ type JobManager struct {
 	nextID int64
 	mu     sync.RWMutex
 	jobs   map[string]*Job
+	shell  shellSpec
+	err    error
 }
 
 func NewJobManager() *JobManager {
-	return &JobManager{jobs: map[string]*Job{}}
+	shell, err := currentShell()
+	return &JobManager{jobs: map[string]*Job{}, shell: shell, err: err}
 }
 
 func (m *JobManager) Start(command string, cwd string) (*Job, error) {
 	if m == nil {
 		return nil, fmt.Errorf("job manager is nil")
 	}
+	if m.err != nil {
+		return nil, m.err
+	}
 
 	id := fmt.Sprintf("shell-%d", atomic.AddInt64(&m.nextID, 1))
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd := exec.CommandContext(ctx, m.shell.Executable, m.shell.commandArgs(command)...)
 	cmd.Dir = cwd
 
 	job := &Job{

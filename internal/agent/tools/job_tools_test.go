@@ -11,7 +11,7 @@ import (
 
 func TestJobOutputToolReadsCompletedJob(t *testing.T) {
 	jobs := NewJobManager()
-	job, err := jobs.Start("printf hello", t.TempDir())
+	job, err := jobs.Start(testPrintCommand("hello"), t.TempDir())
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -32,7 +32,7 @@ func TestJobOutputToolReadsCompletedJob(t *testing.T) {
 
 func TestJobKillToolKillsRunningJob(t *testing.T) {
 	jobs := NewJobManager()
-	job, err := jobs.Start("sleep 5", t.TempDir())
+	job, err := jobs.Start(testSleepCommand(5), t.TempDir())
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}

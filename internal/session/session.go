@@ -164,6 +164,21 @@ func NewStore(workingDir string) *Store {
 	}
 }
 
+// Close releases the SQLite connection. It is safe to call more than once.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
 func (s *Store) Subscribe() (<-chan Event, func()) {
 	if s.broker == nil {
 		s.broker = NewBroker()

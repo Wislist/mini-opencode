@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"github.com/wislist/mini-opencode/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ func TestCLIRemovedCommandsAreUnknown(t *testing.T) {
 	}
 	// They must not leave anything behind either: /key used to write a secret,
 	// /name used to rewrite config.json.
-	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {
+	if _, err := os.Stat(config.WorkspacePath(dir)); err == nil {
 		t.Fatal("a removed command rewrote config.json")
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".mini-opencode", "secrets.json")); err == nil {

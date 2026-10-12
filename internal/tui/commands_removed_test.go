@@ -80,11 +80,13 @@ func TestPlanModeStillReachableByTab(t *testing.T) {
 func TestChromeNoLongerAdvertisesRemovedCommands(t *testing.T) {
 	m := freshIdleModel(t)
 	m.Init()
+	form := newProviderForm(60)
 
 	surfaces := map[string]string{
-		"input placeholder": m.input.Placeholder,
-		"welcome block":     strings.Join(m.blocks, "\n"),
-		"help bar":          plainText(m.renderHelpBar()),
+		"input placeholder":  m.input.Placeholder,
+		"provider key field": form.key.Placeholder,
+		"welcome block":      strings.Join(m.blocks, "\n"),
+		"help bar":           plainText(m.renderHelpBar()),
 	}
 	for name, text := range surfaces {
 		for _, cmd := range []string{"/help", "/version", "/tools", "/plan", "/workspace", "/key", "/name"} {
@@ -92,6 +94,35 @@ func TestChromeNoLongerAdvertisesRemovedCommands(t *testing.T) {
 				t.Fatalf("%s still advertises %s: %q", name, cmd, text)
 			}
 		}
+	}
+}
+
+func TestRuntimeUnavailableGuidanceDoesNotAdvertiseRemovedCommands(t *testing.T) {
+	m := freshIdleModel(t)
+	m.SetRuntime(nil)
+
+	m.handleInput("hello")
+	m.startInit()
+	m.startCompact()
+
+	joined := strings.Join(m.blocks, "\n")
+	if strings.Contains(joined, "/key") {
+		t.Fatalf("runtime guidance still advertises removed /key: %q", joined)
+	}
+	if !strings.Contains(joined, "/provider") {
+		t.Fatalf("runtime guidance has no valid recovery path: %q", joined)
+	}
+}
+
+func TestBackgroundMemorySuccessDoesNotAppendTranscriptNotice(t *testing.T) {
+	m := freshIdleModel(t)
+	before := len(m.blocks)
+
+	model, _ := m.Update(memoryDistilledMsg{notes: 2})
+	m = model.(*Model)
+
+	if len(m.blocks) != before {
+		t.Fatalf("background memory success appended transcript output: %q", m.blocks[before:])
 	}
 }
 

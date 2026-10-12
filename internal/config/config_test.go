@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,6 +50,55 @@ func TestLoadPreservesCustomDisplayNames(t *testing.T) {
 	}
 }
 
+func TestLoadMemoryRetrievalConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	data := `{
+  "provider": {"name":"echo"},
+  "memory": {
+    "retrieval":"hybrid",
+    "embedding_provider":"relay",
+    "embedding_model":"embed-small",
+    "top_k":4,
+    "candidate_k":15,
+    "max_tokens":900,
+    "min_similarity":0.42
+  }
+}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Memory.HybridEnabled() {
+		t.Fatal("hybrid retrieval was not enabled")
+	}
+	if cfg.Memory.EmbeddingProvider != "relay" || cfg.Memory.EmbeddingModel != "embed-small" {
+		t.Fatalf("memory config = %#v", cfg.Memory)
+	}
+	if cfg.Memory.EffectiveTopK() != 4 || cfg.Memory.EffectiveCandidateK() != 15 || cfg.Memory.EffectiveMaxTokens() != 900 {
+		t.Fatalf("effective memory config = %#v", cfg.Memory)
+	}
+	if cfg.Memory.EffectiveMinSimilarity() != 0.42 {
+		t.Fatalf("min similarity = %v", cfg.Memory.EffectiveMinSimilarity())
+	}
+}
+
+func TestMemoryRetrievalDefaultsStayLexical(t *testing.T) {
+	cfg := Default()
+	if cfg.Memory.HybridEnabled() {
+		t.Fatal("hybrid retrieval should require explicit opt-in")
+	}
+	if cfg.Memory.EffectiveTopK() != 3 || cfg.Memory.EffectiveCandidateK() != 12 || cfg.Memory.EffectiveMaxTokens() != 1600 {
+		t.Fatalf("defaults = %#v", cfg.Memory)
+	}
+	if cfg.Memory.EffectiveMinSimilarity() != 0.35 {
+		t.Fatalf("default min similarity = %v", cfg.Memory.EffectiveMinSimilarity())
+	}
+}
+
 func TestProviderConfigResolvesAPIKeyFromEnv(t *testing.T) {
 	t.Setenv("TEST_DEEPSEEK_KEY", "secret")
 	cfg := ProviderConfig{APIKeyEnv: "TEST_DEEPSEEK_KEY"}
@@ -57,14 +107,11 @@ func TestProviderConfigResolvesAPIKeyFromEnv(t *testing.T) {
 	}
 }
 
-func TestProviderConfigResolvesAPIKeyFromLocalStore(t *testing.T) {
-	dir := t.TempDir()
-	if err := SaveProviderKey(dir, "deepseek", "local-secret"); err != nil {
-		t.Fatalf("SaveProviderKey() error = %v", err)
-	}
-	cfg := ProviderConfig{Name: "deepseek"}
-	if got := cfg.ResolvedAPIKeyFrom(dir); got != "local-secret" {
-		t.Fatalf("ResolvedAPIKeyFrom() = %q", got)
+func TestProviderConfigInlineAPIKeyTakesPriorityOverEnv(t *testing.T) {
+	t.Setenv("TEST_DEEPSEEK_KEY", "from-env")
+	cfg := ProviderConfig{Name: "deepseek", APIKey: "from-config", APIKeyEnv: "TEST_DEEPSEEK_KEY"}
+	if got := cfg.ResolvedAPIKey(); got != "from-config" {
+		t.Fatalf("ResolvedAPIKey() = %q", got)
 	}
 }
 
@@ -133,8 +180,13 @@ func TestNormalizeAllowedRootsDedupesAndCleans(t *testing.T) {
 func TestLoadNormalizesAllowedRoots(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	cfgJSON := `{"workspace":{"allowed_roots":["` + dir + `","` + dir + `/"]}}`
-	if err := os.WriteFile(path, []byte(cfgJSON), 0644); err != nil {
+	cfgJSON, err := json.Marshal(map[string]any{
+		"workspace": map[string]any{"allowed_roots": []string{dir, dir + string(os.PathSeparator)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, cfgJSON, 0644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)

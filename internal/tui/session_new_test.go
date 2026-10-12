@@ -7,15 +7,15 @@ import (
 	"charm.land/bubbles/v2/viewport"
 
 	"github.com/wislist/mini-opencode/internal/config"
-	"github.com/wislist/mini-opencode/internal/session"
 )
 
 func TestHandleNewSessionClearsTranscriptAndScreen(t *testing.T) {
 	cfg := config.Default()
+	store := newTestSessionStore(t, t.TempDir())
 	m := &Model{
 		viewport:      viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
 		cfg:           &cfg,
-		sessions:      session.NewStore(t.TempDir()),
+		sessions:      store,
 		streamingIdx:  3,
 		streamingText: "partial response",
 		blocks:        []string{"old user message", "old assistant message"},

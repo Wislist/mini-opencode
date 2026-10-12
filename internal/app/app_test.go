@@ -12,10 +12,10 @@ import (
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/config"
-	"github.com/wislist/mini-opencode/internal/session"
 )
 
 func TestRunBannerReportsTheVersion(t *testing.T) {
+	setTestHome(t, t.TempDir())
 	var out bytes.Buffer
 	in := strings.NewReader("/quit\n")
 
@@ -124,7 +124,7 @@ func TestToolDiffPreviewShowsEditAndWriteChanges(t *testing.T) {
 // silent type-assertion failure would disable the whole feature.
 func TestTodoReaderForWiresSessionStore(t *testing.T) {
 	dir := t.TempDir()
-	store := session.NewStore(dir)
+	store := newTestSessionStore(t, dir)
 	sess := store.Create("chain")
 	sess.Todos = `[{"content":"task","status":"pending"}]`
 	if err := store.Save(sess); err != nil {

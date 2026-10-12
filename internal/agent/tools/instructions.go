@@ -14,10 +14,13 @@ import (
 var instructionFiles embed.FS
 
 type InstructionData struct {
-	BannedCommands  string
-	MaxOutputLength int
-	MaxResults      int
-	RgAvailable     bool
+	BannedCommands   string
+	MaxOutputLength  int
+	MaxResults       int
+	RgAvailable      bool
+	ShellName        string
+	ShellEnvironment string
+	Windows          bool
 }
 
 var instructionFileByTool = map[string]string{
@@ -36,12 +39,21 @@ var instructionFileByTool = map[string]string{
 
 func DefaultInstructionData() InstructionData {
 	_, rgErr := exec.LookPath("rg")
-	return InstructionData{
+	data := InstructionData{
 		BannedCommands:  strings.Join(DefaultBannedCommands, ", "),
 		MaxOutputLength: DefaultMaxOutputLength,
 		MaxResults:      200,
 		RgAvailable:     rgErr == nil,
 	}
+	if shell, err := currentShell(); err == nil {
+		data.ShellName = shell.Name
+		data.ShellEnvironment = shell.environmentDescription()
+		data.Windows = shell.Windows
+	} else {
+		data.ShellName = "platform shell"
+		data.ShellEnvironment = err.Error()
+	}
+	return data
 }
 
 func RenderToolInstructions(name string, data InstructionData) (string, error) {

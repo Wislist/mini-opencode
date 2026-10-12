@@ -186,7 +186,7 @@ func (t *WebSearchTool) Run(ctx context.Context, input agent.ToolInput) (agent.T
 	}
 	if strings.TrimSpace(t.options.SearchURL) == "" {
 		return agent.ToolOutput{}, fmt.Errorf(
-			"web_search: no search endpoint configured; set web.search_url in config.json (for example a SearXNG instance with JSON output)")
+			"web_search: no search endpoint configured; set web.search_url in .mini-opencode/config.json (for example a SearXNG instance with JSON output)")
 	}
 
 	endpoint := buildSearchURL(t.options.SearchURL, query)

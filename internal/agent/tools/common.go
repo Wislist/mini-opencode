@@ -32,4 +32,8 @@ var DefaultBannedCommands = []string{
 	"git push",
 	"chmod -R 777",
 	"chown -R",
+	"format-volume",
+	"clear-disk",
+	"remove-partition",
+	"remove-item -recurse -force c:\\",
 }

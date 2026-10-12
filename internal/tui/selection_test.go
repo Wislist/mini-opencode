@@ -362,5 +362,5 @@ func selectionTestModel(t *testing.T) *Model {
 	return m
 }
 
-// errClipboardForTest simulates pbcopy failing.
+// errClipboardForTest simulates the host clipboard API failing.
 var errClipboardForTest = errors.New("clipboard unavailable")

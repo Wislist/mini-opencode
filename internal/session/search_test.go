@@ -8,7 +8,7 @@ import (
 )
 
 func TestSearchMessagesFindsStoredTranscripts(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	if !store.SearchAvailable() {
 		t.Skip("full-text search unavailable in this SQLite build")
 	}
@@ -58,7 +58,7 @@ func TestSearchMessagesFindsStoredTranscripts(t *testing.T) {
 }
 
 func TestSearchMessagesSupportsPhraseAndEmptyQueries(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	if !store.SearchAvailable() {
 		t.Skip("full-text search unavailable in this SQLite build")
 	}
@@ -112,7 +112,7 @@ func TestSearchMessagesSupportsPhraseAndEmptyQueries(t *testing.T) {
 // in step with the messages table, which is what makes an edited or compacted
 // transcript searchable by its current content.
 func TestSearchMessagesTracksEditsAndDeletes(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	if !store.SearchAvailable() {
 		t.Skip("full-text search unavailable in this SQLite build")
 	}

@@ -163,7 +163,9 @@ type Model struct {
 	// within a run and resets when the list is cleared.
 	todosCollapsed bool
 	// selection is the current mouse text selection; see selection.go.
-	selection selection
+	selection                 selection
+	selectionScrollGeneration uint64
+	selectionScrollPending    bool
 	// permissionsCursor is the highlighted row in the /permissions picker.
 	permissionsCursor int
 	// providerMenu/modelMenu are snapshots taken when the matching picker
@@ -196,7 +198,7 @@ type Model struct {
 	// keys (kitty keyboard protocol). Shift+Enter only arrives as itself when
 	// it can; otherwise the fallback newline keys are the only option.
 	supportsShiftEnter bool
-	// clipboard receives copied text. Nil means pbcopy.
+	// clipboard receives copied text. Nil means the native system clipboard.
 	clipboard ClipboardWriter
 	// selectionHighlighted reports whether the last rendered frame actually
 	// painted a selection. Styling is stripped on non-TTY output, so escape
@@ -217,7 +219,8 @@ type Model struct {
 	// disables automatic extraction.
 	memoryDistiller *memory.Distiller
 	// memoryStore backs the /memory command.
-	memoryStore *memory.Store
+	memoryStore     *memory.Store
+	memoryRetriever memory.Retriever
 	// streamRenderPending is set while a throttled repaint of the streaming
 	// assistant block is queued; see stream.go for why rendering is throttled.
 	streamRenderPending bool
@@ -523,7 +526,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case selectionScrollMsg:
+		return m, m.handleSelectionScroll(msg)
 	case tea.WindowSizeMsg:
+		m.clearSelection()
 		// Never render into the terminal's final cell. Many terminals wrap as
 		// soon as that cell is written; one physical wrap can scroll the whole
 		// alternate screen and expose rows from the previous conversation.
@@ -607,16 +613,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, textinput.Blink)
 
 	case memoryDistilledMsg:
-		// Extraction is a background enhancement, so a failure is reported
-		// quietly rather than as an error the user must act on: the run they
-		// cared about already succeeded.
-		if msg.err != nil {
-			break
-		}
-		if msg.notes > 0 {
-			m.addBlock(toolArrow.Render(fmt.Sprintf("⟳ remembered %d note(s) for future sessions", msg.notes)))
-			m.refreshViewport()
-		}
+		// Extraction is a background implementation detail. Success and failure
+		// are both silent because neither changes the completed answer.
+
+	case memorySearchMsg:
+		m.renderMemorySearch(msg)
 
 	case sessionTitleMsg:
 		if msg.err == nil && msg.title != "" && m.currentSession != nil {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -32,15 +31,18 @@ func RunTUI(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load("config.json")
+	cfg, err := config.LoadWorkspace(workingDir)
 	if err != nil {
 		return err
 	}
 
 	model := tui.New(&cfg, workingDir, version)
+	memoryStore := memory.NewStore(workingDir)
+	memoryRetriever, closeMemoryRetriever := newMemoryRetriever(&cfg, workingDir, memoryStore)
+	defer closeMemoryRetriever()
 
 	// Start the configured MCP servers once; their tools are re-registered on
-	// every runtime rebuild so /key and reloads keep them available.
+	// every runtime rebuild so provider changes keep them available.
 	mcpManager := mcp.NewManager()
 	mcpManager.Start(ctx, mcpServerConfigs(cfg.MCPServers))
 	defer mcpManager.Close()
@@ -57,6 +59,7 @@ func RunTUI(ctx context.Context) error {
 	model.SetPlanHook(planHook)
 
 	sessionStore := session.NewStore(workingDir)
+	defer sessionStore.Close()
 	model.SetSessionStore(sessionStore)
 	observer := newSessionFileObserver(sessionStore, model.CurrentSessionID)
 	todos := newSessionTodoStore(sessionStore, model.CurrentSessionID)
@@ -85,7 +88,7 @@ func RunTUI(ctx context.Context) error {
 	})
 
 	model.SetRuntimeFactory(func(newCfg config.Config) (*agent.Runtime, error) {
-		return newTUIRuntime(workingDir, newCfg, model, tuiRuntimeExtras(newCfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model))
+		return newTUIRuntime(workingDir, newCfg, model, tuiRuntimeExtras(newCfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model, memoryStore, memoryRetriever))
 	})
 	model.SetCompactor(func(ctx context.Context) (agent.CompactResult, error) {
 		summaryPrompt, err := prompt.SummarySystemPrompt(workingDir)
@@ -98,18 +101,15 @@ func RunTUI(ctx context.Context) error {
 		return model.Runtime().CompactDetailed(ctx, summaryPrompt)
 	})
 
-	rt, notice, err := startRuntime(workingDir, &cfg, model, tuiRuntimeExtras(cfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model))
+	rt, err := startRuntime(workingDir, &cfg, model, tuiRuntimeExtras(cfg, workingDir, mcpManager.Tools(), observer, todos, planHook, model, memoryStore, memoryRetriever))
 	if err != nil {
 		return err
 	}
 	model.SetRuntime(rt)
-	if notice != "" {
-		model.AddSystemNotice(notice)
-	}
 	// One store serves both the tool and the /memory command, so a note the
 	// agent writes is immediately visible to the user.
-	memoryStore := memory.NewStore(workingDir)
 	model.SetMemoryStore(memoryStore)
+	model.SetMemoryRetriever(memoryRetriever)
 	// Distillation runs after a run finishes, using whichever provider is
 	// configured *then*: resolving per call keeps it from writing notes through
 	// a provider the user switched away from.
@@ -143,15 +143,18 @@ func RunTUI(ctx context.Context) error {
 // tuiRuntimeExtras assembles the runtime dependencies for the TUI, including
 // the subagent runner built from the current provider configuration.
 func tuiRuntimeExtras(cfg config.Config, workingDir string, mcpTools []agent.Tool,
-	observer tools.FileObserver, todos tools.TodoStore, planHook *agent.PlanModeHook, model *tui.Model) runtimeExtras {
+	observer tools.FileObserver, todos tools.TodoStore, planHook *agent.PlanModeHook, model *tui.Model,
+	memoryStore *memory.Store, memoryRetriever memory.Retriever) runtimeExtras {
 	extras := runtimeExtras{
-		mcpTools:     mcpTools,
-		observer:     observer,
-		todos:        todos,
-		planHook:     planHook,
-		planApprover: model.MakePlanApprover(),
-		todoReader:   todoReaderFor(cfg, todos),
-		memories:     memory.NewStore(workingDir),
+		mcpTools:        mcpTools,
+		observer:        observer,
+		todos:           todos,
+		planHook:        planHook,
+		planApprover:    model.MakePlanApprover(),
+		todoReader:      todoReaderFor(cfg, todos),
+		memories:        memoryStore,
+		memoryRetriever: memoryRetriever,
+		memoryLimit:     cfg.Memory.EffectiveTopK(),
 		// Recall is scored against the session's opening request, so a resumed
 		// conversation recalls notes relevant to the work in hand rather than
 		// whatever was written most recently.
@@ -184,6 +187,13 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 	systemPrompt, err := prompt.BuildSystemPrompt(prompt.PromptCoder, promptContext)
 	if err != nil {
 		return nil, err
+	}
+	recallLimit := extras.memoryLimit
+	if recallLimit <= 0 {
+		recallLimit = memoryRecallLimit
+	}
+	if recall := tools.MemoryRecallSectionWithRetriever(context.Background(), extras.memoryRetriever, extras.memoryQuery, recallLimit); recall != "" {
+		systemPrompt += "\n\n" + recall
 	}
 
 	provider, err := newProvider(cfg.Provider, workingDir)
@@ -230,6 +240,9 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 	for _, tool := range tools.CodingTools(codingOptions) {
 		options = append(options, agent.WithTool(tool))
 	}
+	if memTool := tools.NewMemoryTool(tools.MemoryOptions{Store: extras.memories, Retriever: extras.memoryRetriever}); memTool != nil {
+		options = append(options, agent.WithTool(memTool))
+	}
 	for _, tool := range extras.mcpTools {
 		options = append(options, agent.WithTool(tool))
 	}
@@ -240,26 +253,21 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 // startRuntime builds the TUI runtime, falling back to the local echo provider
 // when the configured one cannot be built.
 //
-// The common cause is a provider that has no key yet. Refusing to open the
-// interface would leave the user with a config file and no way to fix it from
-// inside the app, so the TUI still starts and the notice says which one-liner
-// repairs it (/provider add with the same name writes the key for the
-// configured provider, because the model keeps the original config).
-func startRuntime(workingDir string, cfg *config.Config, model *tui.Model, extras runtimeExtras) (*agent.Runtime, string, error) {
+// Missing credentials must not prevent opening the provider settings. Keep the
+// original configuration for later repairs, without adding a startup notice.
+func startRuntime(workingDir string, cfg *config.Config, model *tui.Model, extras runtimeExtras) (*agent.Runtime, error) {
 	rt, err := newTUIRuntime(workingDir, *cfg, model, extras)
 	if err == nil {
-		return rt, "", nil
+		return rt, nil
 	}
 	fallback := *cfg
 	fallback.Provider = config.ProviderConfig{Name: config.ProviderTypeEcho, Type: config.ProviderTypeEcho}
 	echoRuntime, echoErr := newTUIRuntime(workingDir, fallback, model, extras)
 	if echoErr != nil {
 		// The provider was not the problem; report the original failure.
-		return nil, "", err
+		return nil, err
 	}
-	return echoRuntime, fmt.Sprintf(
-		"provider %q 无法启用：%v\n用 /provider add 补上密钥（provider 名照旧填，密钥写在第三个框），或 /provider 换一个提供商（当前先用本地回显运行）。",
-		cfg.Provider.Name, err), nil
+	return echoRuntime, nil
 }
 
 // liveProvider resolves the configured provider on every call.
@@ -301,7 +309,7 @@ func saveDisplayNames(workingDir string, cfg *config.Config, user, assistant str
 	if assistant != "" {
 		cfg.Assistant = assistant
 	}
-	if err := config.Save(filepath.Join(workingDir, "config.json"), *cfg); err != nil {
+	if err := config.SaveProjectDisplayNames(workingDir, cfg.User, cfg.Assistant); err != nil {
 		return *cfg, err
 	}
 	return *cfg, nil

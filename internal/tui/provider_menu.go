@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -53,7 +52,16 @@ func (m *Model) handleProvider(input string) (tea.Model, tea.Cmd) {
 	}
 
 	previous := m.cfg.Provider.Name
-	changed, _, err := m.cfg.ApplyProviderCommand(cmd, m.configPath())
+	configPath := ""
+	if cmd.Kind == config.ProviderCommandAdd {
+		configPath, err = m.configPath()
+		if err != nil {
+			m.addBlock(errorStyle.Render("定位全局 config.json 失败：" + err.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+	}
+	changed, _, err := m.cfg.ApplyProviderCommand(cmd, configPath)
 	if err != nil {
 		m.addBlock(errorStyle.Render(err.Error()))
 		m.refreshViewport()
@@ -61,9 +69,9 @@ func (m *Model) handleProvider(input string) (tea.Model, tea.Cmd) {
 	}
 	switch cmd.Kind {
 	case config.ProviderCommandAdd:
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已写入 config.json：provider %s → %s（type %s）",
+		m.addBlock(toolArrow.Render(fmt.Sprintf("已写入全局 ~/.mini-opencode/config.json：provider %s → %s（type %s）",
 			m.cfg.Provider.Name, m.cfg.Provider.BaseURL, m.cfg.Provider.EffectiveType())))
-		m.addBlock(dimStyle.Render("接着用 /key <api-key> 保存它的密钥，或改用 api_key_env。"))
+		m.addBlock(dimStyle.Render("如需密钥，用 /provider add 表单以同名更新，或配置 api_key_env。"))
 	default:
 		if !changed {
 			m.addBlock(dimStyle.Render("provider 未变：" + m.cfg.Provider.Name))
@@ -99,6 +107,26 @@ func (m *Model) handleModel(input string) (tea.Model, tea.Cmd) {
 		m.addBlock(errorStyle.Render(err.Error()))
 		m.refreshViewport()
 		return m, nil
+	}
+	if cmd.Context {
+		path, pathErr := m.configPath()
+		if pathErr != nil {
+			m.addBlock(errorStyle.Render("定位全局 config.json 失败：" + pathErr.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+		changed, message, err := m.cfg.ApplyModelContext(cmd, path)
+		if err != nil {
+			m.addBlock(errorStyle.Render(err.Error()))
+		} else {
+			m.addBlock(toolArrow.Render(message))
+		}
+		if changed {
+			m.rebuildWithNotice()
+		} else {
+			m.refreshViewport()
+		}
+		return m, m.input.Focus()
 	}
 	if cmd.List {
 		m.openModelMenu()
@@ -140,7 +168,7 @@ func (m *Model) providerMenuItems() []providerMenuItem {
 	for _, p := range m.cfg.Providers {
 		items = append(items, providerMenuItem{
 			name:    p.Name,
-			summary: p.Summary(m.workingDir),
+			summary: p.Summary(),
 			active:  strings.EqualFold(p.Name, m.cfg.ActiveProvider),
 		})
 	}
@@ -167,7 +195,7 @@ func (m *Model) openModelMenu() {
 	m.modelMenu = m.cfg.Provider.CatalogModels()
 	if len(m.modelMenu) == 0 {
 		m.addBlock(dimStyle.Render(fmt.Sprintf(
-			"provider %s 没有配置模型：用 /model <id> 指定，或在 config.json 的 models 里列出。",
+			"provider %s 没有配置模型：用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出。",
 			m.cfg.Provider.Name)))
 		m.refreshViewport()
 		return
@@ -224,7 +252,7 @@ func (m *Model) renderModelMenu() string {
 	start, end := visibleMenuWindow(len(m.modelMenu), m.modelCursor, m.menuItemBudget())
 	lines := []string{
 		keyLabel.Render("model:") + "  " +
-			dimStyle.Render(fmt.Sprintf("provider %s · ↑↓ select · enter apply · esc cancel%s",
+			dimStyle.Render(fmt.Sprintf("provider %s · ↑↓ select · enter apply · c 上下文 · esc cancel%s",
 				m.cfg.Provider.Name, windowLabel(start, end, len(m.modelMenu)))),
 	}
 	for i := start; i < end; i++ {
@@ -304,7 +332,7 @@ func (m *Model) applyProviderSelection(item providerMenuItem) (tea.Model, tea.Cm
 		return m, nil
 	}
 	if _, _, err := m.cfg.ApplyProviderCommand(
-		config.ProviderCommand{Kind: config.ProviderCommandSwitch, Name: item.name}, m.configPath()); err != nil {
+		config.ProviderCommand{Kind: config.ProviderCommandSwitch, Name: item.name}, ""); err != nil {
 		m.addBlock(errorStyle.Render(err.Error()))
 		m.refreshViewport()
 		return m, nil
@@ -325,6 +353,13 @@ func (m *Model) closeProviderMenu() (tea.Model, tea.Cmd) {
 // handleModelMenuKey drives the model picker.
 func (m *Model) handleModelMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "c":
+		m.closeModelMenu()
+		m.input.SetValue("/model context ")
+		m.input.CursorEnd()
+		m.syncInputHeight()
+		m.invalidateFooter()
+		return m, m.input.Focus()
 	case "up", "k", "shift+tab":
 		if m.modelCursor > 0 {
 			m.modelCursor--
@@ -375,10 +410,10 @@ func (m *Model) closeModelMenu() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// configPath is the file /provider add and /key write. It mirrors the path the
+// configPath is the file /provider add writes. It mirrors the path the
 // assembly layer loads, so a change made in the TUI survives a restart.
-func (m *Model) configPath() string {
-	return filepath.Join(m.workingDir, "config.json")
+func (m *Model) configPath() (string, error) {
+	return config.GlobalConfigPath()
 }
 
 // rebuildRuntime builds a runtime from the current configuration and moves the
@@ -402,8 +437,8 @@ func (m *Model) rebuildRuntime() error {
 
 // rebuildWithNotice rebuilds the runtime and reports a failure in the
 // transcript. The old runtime keeps serving on failure, while the configured
-// provider stays on the new one: that is what lets a follow-up /key store the
-// key under the name the user just selected.
+// provider stays on the new one so a follow-up /provider add can update that
+// same catalog entry.
 func (m *Model) rebuildWithNotice() {
 	if err := m.rebuildRuntime(); err != nil {
 		m.addBlock(errorStyle.Render("✗ " + err.Error()))

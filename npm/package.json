@@ -1,0 +1,30 @@
+{
+  "name": "@wislist/mini-opencode",
+  "version": "0.0.0-development",
+  "private": true,
+  "description": "A local coding agent terminal built with Go and Bubble Tea.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Wislist/mini-opencode.git"
+  },
+  "homepage": "https://github.com/Wislist/mini-opencode#readme",
+  "bugs": {
+    "url": "https://github.com/Wislist/mini-opencode/issues"
+  },
+  "type": "commonjs",
+  "bin": {
+    "mini-opencode": "bin/mini-opencode.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

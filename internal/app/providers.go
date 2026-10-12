@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,7 +16,7 @@ import (
 
 // providerCommandResult is what /provider and /model hand back to a front end:
 // the text to show, whether the runtime has to be rebuilt, and whether
-// config.json was rewritten.
+// the global ~/.mini-opencode/config.json was rewritten.
 //
 // Both front ends share these handlers so a slash command cannot mean one thing
 // in the TUI and another in the line-mode CLI.
@@ -47,16 +47,23 @@ func applyProviderCommand(cfg *config.Config, workingDir, input string) provider
 			"（不带参数的交互式新增请运行 TUI：会依次询问名称 / 地址 / 密钥，再拉取模型勾选）"}
 	}
 	previousCatalog := cfg.Providers
-	changed, saved, err := cfg.ApplyProviderCommand(cmd, filepath.Join(workingDir, "config.json"))
+	configPath := ""
+	if cmd.Kind == config.ProviderCommandAdd {
+		configPath, err = config.GlobalConfigPath()
+		if err != nil {
+			return providerCommandResult{Message: fmt.Sprintf("定位全局 config.json 失败：%v", err)}
+		}
+	}
+	changed, saved, err := cfg.ApplyProviderCommand(cmd, configPath)
 	if err != nil {
 		return providerCommandResult{Message: err.Error()}
 	}
 	switch cmd.Kind {
 	case config.ProviderCommandList:
-		return providerCommandResult{Message: renderProviderList(*cfg, workingDir)}
+		return providerCommandResult{Message: renderProviderList(*cfg)}
 	case config.ProviderCommandAdd:
 		return providerCommandResult{
-			Message: fmt.Sprintf("已写入 config.json：provider %s → %s（type %s）· 本次进程已切换\n接着在 config.json 里补上 api_key / api_key_env，或用 TUI 的 /provider add 表单（第三个框就是密钥，写入 .mini-opencode/secrets.json）。",
+			Message: fmt.Sprintf("已写入全局 ~/.mini-opencode/config.json：provider %s → %s（type %s）· 本次进程已切换\n接着在全局 config.json 里补上 api_key / api_key_env，或用 TUI 的 /provider add 表单填写密钥。",
 				cfg.Provider.Name, cfg.Provider.BaseURL, cfg.Provider.EffectiveType()) + updatedNote(previousCatalog, cfg.Provider.Name),
 			Changed: changed,
 			Saved:   saved,
@@ -64,12 +71,12 @@ func applyProviderCommand(cfg *config.Config, workingDir, input string) provider
 	default:
 		if !changed {
 			return providerCommandResult{Message: fmt.Sprintf(
-				"provider 未变：%s（%s）", cfg.Provider.Name, cfg.Provider.Summary(workingDir))}
+				"provider 未变：%s（%s）", cfg.Provider.Name, cfg.Provider.Summary())}
 		}
 		return providerCommandResult{
 			Changed: true,
 			Message: fmt.Sprintf("已切换到 provider %s · %s · 仅本次进程生效",
-				cfg.Provider.Name, cfg.Provider.Summary(workingDir)),
+				cfg.Provider.Name, cfg.Provider.Summary()),
 		}
 	}
 }
@@ -88,7 +95,7 @@ func updatedNote(before []config.ProviderConfig, name string) string {
 // renderProviderList prints the catalog with the active entry marked. The rows
 // come from config so the CLI listing and the TUI picker describe a provider
 // the same way.
-func renderProviderList(cfg config.Config, workingDir string) string {
+func renderProviderList(cfg config.Config) string {
 	var b strings.Builder
 	b.WriteString("providers:\n")
 	for _, p := range cfg.Providers {
@@ -96,18 +103,29 @@ func renderProviderList(cfg config.Config, workingDir string) string {
 		if strings.EqualFold(p.Name, cfg.ActiveProvider) {
 			marker = "* "
 		}
-		fmt.Fprintf(&b, "  %s%s\n", marker, p.Summary(workingDir))
+		fmt.Fprintf(&b, "  %s%s\n", marker, p.Summary())
 	}
 	b.WriteString("  usage: /provider <name> · /provider add <name> <base_url> [model]")
-	b.WriteString("（切换仅本次进程生效；add 会写入 config.json）")
+	b.WriteString("（切换仅本次进程生效；add 会写入全局 ~/.mini-opencode/config.json）")
 	return b.String()
 }
 
 // applyModelCommand handles /model for the line-mode CLI.
-func applyModelCommand(cfg *config.Config, input string) providerCommandResult {
+func applyModelCommand(cfg *config.Config, workingDir, input string) providerCommandResult {
 	cmd, err := config.ParseModelCommand(input)
 	if err != nil {
 		return providerCommandResult{Message: err.Error()}
+	}
+	if cmd.Context {
+		path, pathErr := config.GlobalConfigPath()
+		if pathErr != nil {
+			return providerCommandResult{Message: fmt.Sprintf("定位全局 config.json 失败：%v", pathErr)}
+		}
+		changed, message, err := cfg.ApplyModelContext(cmd, path)
+		if err != nil {
+			return providerCommandResult{Message: err.Error()}
+		}
+		return providerCommandResult{Changed: changed, Saved: cmd.Window != nil, Message: message}
 	}
 	if cmd.List {
 		if cfg.Provider.EffectiveType() == config.ProviderTypeEcho {
@@ -155,10 +173,10 @@ func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher
 		return providerCommandResult{Message: fmt.Sprintf(
 			"provider %q 是本地回显，没有模型列表可拉取。", cfg.Provider.Name)}
 	}
-	key := cfg.Provider.ResolvedAPIKeyFrom(workingDir)
+	key := cfg.Provider.ResolvedAPIKey()
 	if key == "" {
 		return providerCommandResult{Message: fmt.Sprintf(
-			"provider %q 还没有可用的密钥：在 config.json 里填 api_key / api_key_env，或用 TUI 的 /provider add 表单补上（第三个框写密钥）。",
+			"provider %q 还没有可用的密钥：在全局 ~/.mini-opencode/config.json 里填 api_key / api_key_env，或用 TUI 的 /provider add 表单补上（第三个框写密钥）。",
 			cfg.Provider.Name)}
 	}
 
@@ -170,7 +188,7 @@ func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher
 	}
 	if len(info) == 0 {
 		return providerCommandResult{Message: fmt.Sprintf(
-			"%s 没有返回任何模型；用 /model <id> 指定，或在 config.json 的 models 里列出。", cfg.Provider.BaseURL)}
+			"%s 没有返回任何模型；用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出。", cfg.Provider.BaseURL)}
 	}
 
 	fetched := make([]string, 0, len(info))
@@ -178,7 +196,9 @@ func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher
 		fetched = append(fetched, entry.ID)
 	}
 	merged := config.MergeModels(cfg.Provider.CatalogModels(), fetched)
-	changed, err := cfg.SetProviderModels(cfg.Provider.Name, merged, "")
+	next := *cfg
+	next.Providers = slices.Clone(cfg.Providers)
+	changed, err := next.SetProviderModels(next.Provider.Name, merged, "")
 	if err != nil {
 		return providerCommandResult{Message: err.Error()}
 	}
@@ -187,10 +207,10 @@ func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher
 	// user configured.
 	windowNote := ""
 	for _, entry := range info {
-		if entry.ID != cfg.Provider.Model || entry.ContextWindow <= 0 {
+		if entry.ID != next.Provider.Model || entry.ContextWindow <= 0 {
 			continue
 		}
-		if applied, err := cfg.SetProviderContextWindow(cfg.Provider.Name, entry.ContextWindow); err == nil && applied {
+		if applied, err := next.SetProviderContextWindow(next.Provider.Name, entry.ContextWindow); err == nil && applied {
 			changed = true
 			windowNote = fmt.Sprintf(" · 窗口 %s（来自 /models）", config.FormatContextWindow(entry.ContextWindow))
 		}
@@ -199,13 +219,18 @@ func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher
 		return providerCommandResult{Message: fmt.Sprintf(
 			"模型列表没有变化（%d 个）：%s", len(merged), strings.Join(merged, ", "))}
 	}
-	if err := config.Save(filepath.Join(workingDir, "config.json"), *cfg); err != nil {
-		return providerCommandResult{Message: fmt.Sprintf("写入 config.json 失败：%v", err)}
+	globalPath, err := config.GlobalConfigPath()
+	if err != nil {
+		return providerCommandResult{Message: fmt.Sprintf("定位全局 config.json 失败：%v", err)}
 	}
+	if err := config.SaveProviderCatalog(globalPath, next); err != nil {
+		return providerCommandResult{Message: fmt.Sprintf("写入全局 ~/.mini-opencode/config.json 失败：%v", err)}
+	}
+	*cfg = next
 	return providerCommandResult{
 		Changed: true,
 		Saved:   true,
-		Message: fmt.Sprintf("已从 %s 获取 %d 个模型并写入 config.json：%s\n当前 model：%s%s（用 /model <id> 切换）",
+		Message: fmt.Sprintf("已从 %s 获取 %d 个模型并写入全局 ~/.mini-opencode/config.json：%s\n当前 model：%s%s（用 /model <id> 切换）",
 			cfg.Provider.BaseURL, len(merged), strings.Join(merged, ", "), cfg.Provider.Model, windowNote),
 	}
 }
@@ -216,7 +241,7 @@ func renderModelList(cfg config.Config) string {
 	fmt.Fprintf(&b, "models for provider %s:\n", cfg.Provider.Name)
 	models := cfg.Provider.CatalogModels()
 	if len(models) == 0 {
-		b.WriteString("  (未配置模型；用 /model <id> 指定，或在 config.json 的 models 里列出)\n")
+		b.WriteString("  (未配置模型；用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出)\n")
 	}
 	for _, model := range models {
 		marker := "  "
@@ -225,7 +250,7 @@ func renderModelList(cfg config.Config) string {
 		}
 		fmt.Fprintf(&b, "  %s%s\n", marker, model)
 	}
-	b.WriteString("  /model <id>（仅本次进程生效）")
+	b.WriteString("  /model <id>（仅本次进程生效） · /model context <tokens|1M|auto>（保存上下文窗口）")
 	return b.String()
 }
 
@@ -235,17 +260,20 @@ func renderModelList(cfg config.Config) string {
 // With nothing configured yet it creates the built-in DeepSeek entry first, so
 // first-run setup stays a single command instead of "edit JSON, then run".
 func configureProviderKey(scanner *bufio.Scanner, out io.Writer, workingDir string, cfg *config.Config, key string) error {
-	if cfg.Provider.EffectiveType() == config.ProviderTypeEcho {
-		if !isBareEchoCatalog(*cfg) {
+	_ = workingDir
+	next := *cfg
+	next.Providers = slices.Clone(cfg.Providers)
+	if next.Provider.EffectiveType() == config.ProviderTypeEcho {
+		if !isBareEchoCatalog(next) {
 			return fmt.Errorf("provider %q 是本地回显，不接收密钥；可用 /provider <name> 选择目标提供商：%s",
-				cfg.Provider.Name, strings.Join(cfg.ProviderNames(), ", "))
+				next.Provider.Name, strings.Join(next.ProviderNames(), ", "))
 		}
-		if err := cfg.AddProvider(config.DefaultDeepSeekProvider()); err != nil {
+		if err := next.AddProvider(config.DefaultDeepSeekProvider()); err != nil {
 			return err
 		}
 	}
 	if key == "" {
-		fmt.Fprintf(out, "API key for %s (%s): ", cfg.Provider.DisplayName(), cfg.Provider.Name)
+		fmt.Fprintf(out, "API key for %s (%s): ", next.Provider.DisplayName(), next.Provider.Name)
 		if !scanner.Scan() {
 			return scanner.Err()
 		}
@@ -254,22 +282,22 @@ func configureProviderKey(scanner *bufio.Scanner, out io.Writer, workingDir stri
 	if key == "" {
 		return fmt.Errorf("api key is required")
 	}
-	if err := config.SaveProviderKey(workingDir, cfg.Provider.Name, key); err != nil {
-		return err
-	}
-	// The key now lives in secrets.json, so drop any inline copy: one source of
-	// truth, and config.json stays safe to read aloud. Everything else the user
-	// configured here (endpoint, model, timeout) is left exactly as it was.
-	provider := cfg.Provider
-	provider.APIKey = ""
-	cfg.Provider = provider
-	for i := range cfg.Providers {
-		if strings.EqualFold(cfg.Providers[i].Name, provider.Name) {
-			cfg.Providers[i].APIKey = ""
+	next.Provider.APIKey = key
+	for i := range next.Providers {
+		if strings.EqualFold(next.Providers[i].Name, next.Provider.Name) {
+			next.Providers[i].APIKey = key
 			break
 		}
 	}
-	return config.Save(filepath.Join(workingDir, "config.json"), *cfg)
+	globalPath, err := config.GlobalConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := config.SaveProviderCatalog(globalPath, next); err != nil {
+		return err
+	}
+	*cfg = next
+	return nil
 }
 
 // ensureProviderKey asks for the active provider's key when it is needed and
@@ -279,7 +307,7 @@ func ensureProviderKey(scanner *bufio.Scanner, out io.Writer, workingDir string,
 	if cfg.Provider.EffectiveType() == config.ProviderTypeEcho {
 		return nil
 	}
-	if cfg.Provider.ResolvedAPIKeyFrom(workingDir) != "" {
+	if cfg.Provider.ResolvedAPIKey() != "" {
 		return nil
 	}
 	return configureProviderKey(scanner, out, workingDir, cfg, "")

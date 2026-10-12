@@ -818,7 +818,7 @@ func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error
 
 	err := fmt.Errorf(
 		"turn budget exhausted after %d turns. Send a follow-up message to continue from here, "+
-			"raise agent.max_turns in config.json, or run /compact to shrink the context", r.maxTurns)
+			"raise agent.max_turns in .mini-opencode/config.json, or run /compact to shrink the context", r.maxTurns)
 	emit(Event{Type: EventBudgetExhausted, Turn: r.maxTurns, Error: err})
 	emit(Event{Type: EventRunFailed, Turn: r.maxTurns, Error: err})
 	return err

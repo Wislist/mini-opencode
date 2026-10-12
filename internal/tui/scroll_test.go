@@ -117,6 +117,7 @@ func TestDetectTerminalProfilePerProgram(t *testing.T) {
 
 func TestDetectTerminalProfileFallsBackToTerm(t *testing.T) {
 	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("WT_SESSION", "")
 	t.Setenv("TERM", "xterm-256color")
 	got := detectTerminalProfile()
 	if got.name != "xterm-256color" {
@@ -124,5 +125,19 @@ func TestDetectTerminalProfileFallsBackToTerm(t *testing.T) {
 	}
 	if got.wheelLines != wheelScrollLines {
 		t.Fatalf("wheelLines = %d, want %d", got.wheelLines, wheelScrollLines)
+	}
+}
+
+func TestDetectTerminalProfileRecognizesWindowsTerminal(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("WT_SESSION", "session-id")
+
+	got := detectTerminalProfile()
+	if got.name != "Windows Terminal" {
+		t.Fatalf("name = %q, want Windows Terminal", got.name)
+	}
+	if got.wheelLines != wheelScrollLines || !got.mouseWheel || !got.alternateScroll {
+		t.Fatalf("profile = %+v, want standard wheel handling", got)
 	}
 }

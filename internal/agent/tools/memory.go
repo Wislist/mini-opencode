@@ -23,6 +23,7 @@ const (
 // conversation: it is how a decision or a gotcha survives into the next one.
 type MemoryTool struct {
 	store        *memory.Store
+	retriever    memory.Retriever
 	instructions string
 	// defaultLimit bounds how many notes a search returns.
 	defaultLimit int
@@ -32,6 +33,8 @@ type MemoryTool struct {
 type MemoryOptions struct {
 	// Store is the backing note store. A nil store disables the tool.
 	Store *memory.Store
+	// Retriever serves searches. Nil preserves the Store's lexical search.
+	Retriever memory.Retriever
 	// DefaultLimit is the recall size for a search; zero uses 5.
 	DefaultLimit int
 	// InstructionData carries the rendering data for the tool prompt.
@@ -53,6 +56,7 @@ func NewMemoryTool(options MemoryOptions) *MemoryTool {
 	instructions, _ := RenderToolInstructions(MemoryToolName, options.InstructionData)
 	return &MemoryTool{
 		store:        options.Store,
+		retriever:    options.Retriever,
 		instructions: instructions,
 		defaultLimit: options.DefaultLimit,
 	}
@@ -116,7 +120,7 @@ type memoryArgs struct {
 	Limit  int      `json:"limit"`
 }
 
-func (t *MemoryTool) Run(_ context.Context, input agent.ToolInput) (agent.ToolOutput, error) {
+func (t *MemoryTool) Run(ctx context.Context, input agent.ToolInput) (agent.ToolOutput, error) {
 	var args memoryArgs
 	if err := json.Unmarshal(input.Arguments, &args); err != nil {
 		return agent.ToolOutput{}, fmt.Errorf("memory: invalid args: %w", err)
@@ -125,7 +129,7 @@ func (t *MemoryTool) Run(_ context.Context, input agent.ToolInput) (agent.ToolOu
 	case "write":
 		return t.runWrite(args)
 	case "search":
-		return t.runSearch(args)
+		return t.runSearch(ctx, args)
 	case "read":
 		return t.runRead(args)
 	case "list":
@@ -160,12 +164,18 @@ func (t *MemoryTool) runWrite(args memoryArgs) (agent.ToolOutput, error) {
 	}, nil
 }
 
-func (t *MemoryTool) runSearch(args memoryArgs) (agent.ToolOutput, error) {
+func (t *MemoryTool) runSearch(ctx context.Context, args memoryArgs) (agent.ToolOutput, error) {
 	limit := args.Limit
 	if limit <= 0 {
 		limit = t.defaultLimit
 	}
-	notes, err := t.store.Search(args.Query, limit)
+	var notes []memory.Note
+	var err error
+	if t.retriever != nil {
+		notes, err = t.retriever.Search(ctx, args.Query, limit)
+	} else {
+		notes, err = t.store.Search(args.Query, limit)
+	}
 	if err != nil {
 		return agent.ToolOutput{}, fmt.Errorf("memory: %w", err)
 	}
@@ -242,7 +252,16 @@ func MemoryRecallSection(store *memory.Store, query string, limit int) string {
 	if store == nil {
 		return ""
 	}
-	notes, err := store.Search(query, limit)
+	return MemoryRecallSectionWithRetriever(context.Background(), memory.LexicalRetriever{Store: store}, query, limit)
+}
+
+// MemoryRecallSectionWithRetriever builds the prompt section from any memory
+// retriever, allowing semantic recall without changing the Markdown store.
+func MemoryRecallSectionWithRetriever(ctx context.Context, retriever memory.Retriever, query string, limit int) string {
+	if retriever == nil {
+		return ""
+	}
+	notes, err := retriever.Search(ctx, query, limit)
 	if err != nil || len(notes) == 0 {
 		return ""
 	}

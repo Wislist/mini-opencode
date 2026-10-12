@@ -41,7 +41,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load("config.json")
+	cfg, err := config.LoadWorkspace(workingDir)
 	if err != nil {
 		return err
 	}
@@ -52,6 +52,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	// The session store and file observer must exist before the runtime is
 	// built: the coding tools need the observer to record reads and snapshots.
 	sessions := session.NewStore(workingDir)
+	defer sessions.Close()
 	currentSession := sessions.Create("new session")
 	observer := newSessionFileObserver(sessions, func() string { return currentSession.ID })
 	todos := newSessionTodoStore(sessions, func() string { return currentSession.ID })
@@ -79,8 +80,13 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		planApprover: planApprover,
 		allowedTools: sessionAllowed,
 		todoReader:   todoReaderFor(cfg, todos),
-		memories:     memory.NewStore(workingDir),
 	}
+	memoryStore := memory.NewStore(workingDir)
+	memoryRetriever, closeMemoryRetriever := newMemoryRetriever(&cfg, workingDir, memoryStore)
+	defer closeMemoryRetriever()
+	extras.memories = memoryStore
+	extras.memoryRetriever = memoryRetriever
+	extras.memoryLimit = cfg.Memory.EffectiveTopK()
 	if subProvider, perr := newSubagentProvider(cfg, workingDir); perr == nil {
 		extras.subagent = newSubagentRunner(subProvider, workingDir, cfg)
 	}
@@ -148,7 +154,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 					return agent.FetchModelCatalog(ctx, baseURL, apiKey, 0)
 				})
 			} else {
-				result = applyModelCommand(&cfg, input)
+				result = applyModelCommand(&cfg, workingDir, input)
 			}
 			fmt.Fprintln(out, result.Message)
 			if result.Changed {
@@ -166,7 +172,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		// /memory takes an optional search query, so it is matched by prefix
 		// before the exact-match switch below.
 		if input == "/memory" || strings.HasPrefix(input, "/memory ") {
-			printMemories(out, workingDir, strings.TrimSpace(strings.TrimPrefix(input, "/memory")))
+			printMemories(out, memoryStore, memoryRetriever, strings.TrimSpace(strings.TrimPrefix(input, "/memory")))
 			fmt.Fprint(out, "\n> ")
 			continue
 		}
@@ -345,7 +351,7 @@ func printStatus(out io.Writer, in statusInput) {
 		// A made-up window is the difference between "your model really is 8k"
 		// and "we do not know": say so where the number is shown, and say how to
 		// fix it.
-		fmt.Fprintf(out, "  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：在 config.json 的 providers[].context_window 指定，或跑 /model refresh 从 /models 读取\n",
+		fmt.Fprintf(out, "  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：用 /model context <tokens> 设置 context_window，或跑 /model refresh 从 /models 读取\n",
 			config.FormatContextWindow(in.cfg.Provider.EffectiveContextWindow()), in.cfg.Provider.Model)
 	}
 	if in.session != nil {
@@ -520,6 +526,10 @@ type runtimeExtras struct {
 	// memories is the cross-session note store. Nil disables both the memory
 	// tool and recall injection.
 	memories *memory.Store
+	// memoryRetriever is lexical by default and hybrid when configured.
+	memoryRetriever memory.Retriever
+	// memoryLimit bounds prompt recall independently of interactive searches.
+	memoryLimit int
 	// memoryQuery seeds the recall injected into the system prompt: recalled
 	// notes are scored against it, so it should describe what is being worked
 	// on. Empty falls back to the most recently updated notes.
@@ -534,11 +544,13 @@ const memoryRecallLimit = 3
 // printMemories lists stored memory notes, or searches them when a query is
 // given. Memory is plain Markdown on disk, so this is a window onto files the
 // user can also edit directly.
-func printMemories(out io.Writer, workingDir, query string) {
-	store := memory.NewStore(workingDir)
+func printMemories(out io.Writer, store *memory.Store, retriever memory.Retriever, query string) {
 	fmt.Fprintf(out, "memory dir: %s\n", store.Dir())
 
-	notes, err := store.Search(query, 20)
+	if retriever == nil {
+		retriever = memory.LexicalRetriever{Store: store}
+	}
+	notes, err := retriever.Search(context.Background(), query, 20)
 	if err != nil {
 		fmt.Fprintf(out, "memory unavailable: %v\n", err)
 		return
@@ -607,7 +619,11 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 	// being worked on are appended to the system prompt so the agent starts
 	// with what earlier sessions learned. The section is omitted entirely when
 	// nothing is remembered, so a fresh workspace pays nothing for this.
-	if recall := tools.MemoryRecallSection(extras.memories, extras.memoryQuery, memoryRecallLimit); recall != "" {
+	recallLimit := extras.memoryLimit
+	if recallLimit <= 0 {
+		recallLimit = memoryRecallLimit
+	}
+	if recall := tools.MemoryRecallSectionWithRetriever(context.Background(), extras.memoryRetriever, extras.memoryQuery, recallLimit); recall != "" {
 		systemPrompt = systemPrompt + "\n\n" + recall
 	}
 
@@ -652,7 +668,7 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 	for _, tool := range tools.CodingTools(codingOptions) {
 		options = append(options, agent.WithTool(tool))
 	}
-	if memTool := tools.NewMemoryTool(tools.MemoryOptions{Store: extras.memories}); memTool != nil {
+	if memTool := tools.NewMemoryTool(tools.MemoryOptions{Store: extras.memories, Retriever: extras.memoryRetriever}); memTool != nil {
 		options = append(options, agent.WithTool(memTool))
 	}
 	for _, tool := range extras.mcpTools {
@@ -711,7 +727,7 @@ func reportMCPFailures(out io.Writer, manager *mcp.Manager) {
 func printMCPStatus(out io.Writer, manager *mcp.Manager) {
 	statuses := manager.Statuses()
 	if len(statuses) == 0 {
-		fmt.Fprintln(out, "no MCP servers configured (config.json -> mcpServers)")
+		fmt.Fprintln(out, "no MCP servers configured (.mini-opencode/config.json -> mcpServers)")
 		return
 	}
 	fmt.Fprintln(out, "MCP servers:")
@@ -771,7 +787,7 @@ func newProvider(cfg config.ProviderConfig, workingDir string) (agent.Provider, 
 		retries, retriesSet := cfg.Retries()
 		provider, err := agent.NewOpenAICompatibleProvider(agent.OpenAICompatibleConfig{
 			BaseURL:       cfg.BaseURL,
-			APIKey:        cfg.ResolvedAPIKeyFrom(workingDir),
+			APIKey:        cfg.ResolvedAPIKey(),
 			Model:         cfg.Model,
 			Timeout:       cfg.RequestTimeout(),
 			MaxRetries:    retries,

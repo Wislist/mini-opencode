@@ -7,10 +7,13 @@ import (
 
 func TestRenderToolInstructionsInjectsData(t *testing.T) {
 	instructions, err := RenderToolInstructions(BashToolName, InstructionData{
-		BannedCommands:  "rm -rf /, git push",
-		MaxOutputLength: 1234,
-		MaxResults:      50,
-		RgAvailable:     true,
+		BannedCommands:   "rm -rf /, git push",
+		MaxOutputLength:  1234,
+		MaxResults:       50,
+		RgAvailable:      true,
+		ShellName:        "PowerShell 7",
+		ShellEnvironment: "Windows Terminal on Windows; use PowerShell syntax and Windows paths.",
+		Windows:          true,
 	})
 	if err != nil {
 		t.Fatalf("RenderToolInstructions() error = %v", err)
@@ -20,6 +23,8 @@ func TestRenderToolInstructionsInjectsData(t *testing.T) {
 		"rm -rf /, git push",
 		"1234",
 		"Ripgrep (`rg`) is available",
+		"PowerShell 7",
+		"Windows paths",
 	} {
 		if !strings.Contains(instructions, want) {
 			t.Fatalf("instructions missing %q", want)

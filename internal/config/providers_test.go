@@ -453,68 +453,26 @@ func TestSaveLoadRoundTripPreservesCatalog(t *testing.T) {
 	}
 }
 
-// Secrets are keyed by provider name, which is what lets a third-party relay
-// keep its own key next to the others.
-func TestSecretsAreScopedByProviderName(t *testing.T) {
-	dir := t.TempDir()
-	if err := SaveProviderKey(dir, "relay", "sk-relay"); err != nil {
-		t.Fatalf("SaveProviderKey: %v", err)
-	}
-	if err := SaveProviderKey(dir, "other", "sk-other"); err != nil {
-		t.Fatalf("SaveProviderKey: %v", err)
-	}
-	store, err := LoadSecretStore(dir)
-	if err != nil {
-		t.Fatalf("LoadSecretStore: %v", err)
-	}
-	if store.ProviderKeys["relay"] != "sk-relay" || store.ProviderKeys["other"] != "sk-other" {
-		t.Fatalf("store = %+v, want both keys", store.ProviderKeys)
-	}
-
-	relay := ProviderConfig{Name: "relay"}
-	if got := relay.ResolvedAPIKeyFrom(dir); got != "sk-relay" {
-		t.Fatalf("relay key = %q, want sk-relay", got)
-	}
-	if got := (ProviderConfig{Name: "unknown"}).ResolvedAPIKeyFrom(dir); got != "" {
-		t.Fatalf("unknown provider key = %q, want empty", got)
-	}
-	if got := (ProviderConfig{}).ResolvedAPIKeyFrom(dir); got != "" {
-		t.Fatalf("empty provider name key = %q, want empty", got)
-	}
-}
-
 func TestAPIKeyPrecedence(t *testing.T) {
-	dir := t.TempDir()
-	if err := SaveProviderKey(dir, "relay", "sk-stored"); err != nil {
-		t.Fatalf("SaveProviderKey: %v", err)
-	}
 	t.Setenv("MINI_OPENCODE_TEST_RELAY_KEY", "sk-env")
 
 	inline := ProviderConfig{Name: "relay", APIKey: "sk-inline", APIKeyEnv: "MINI_OPENCODE_TEST_RELAY_KEY"}
-	if got := inline.ResolvedAPIKeyFrom(dir); got != "sk-inline" {
+	if got := inline.ResolvedAPIKey(); got != "sk-inline" {
 		t.Fatalf("inline key = %q, want sk-inline", got)
 	}
 	fromEnv := ProviderConfig{Name: "relay", APIKeyEnv: "MINI_OPENCODE_TEST_RELAY_KEY"}
-	if got := fromEnv.ResolvedAPIKeyFrom(dir); got != "sk-env" {
+	if got := fromEnv.ResolvedAPIKey(); got != "sk-env" {
 		t.Fatalf("env key = %q, want sk-env", got)
 	}
-	stored := ProviderConfig{Name: "relay"}
-	if got := stored.ResolvedAPIKeyFrom(dir); got != "sk-stored" {
-		t.Fatalf("stored key = %q, want sk-stored", got)
-	}
 	missing := ProviderConfig{Name: "relay", APIKeyEnv: "MINI_OPENCODE_TEST_UNSET_KEY"}
-	if got := missing.ResolvedAPIKeyFrom(dir); got != "sk-stored" {
-		t.Fatalf("unset env should fall back to the store, got %q", got)
+	if got := missing.ResolvedAPIKey(); got != "" {
+		t.Fatalf("unset env should resolve empty, got %q", got)
 	}
 }
 
 // The key source is what explains "why did switching to this provider fail",
 // so each branch has to be distinguishable.
 func TestProviderKeySource(t *testing.T) {
-	dir := t.TempDir()
-	if err := SaveProviderKey(dir, "stored", "sk"); err != nil {
-		t.Fatalf("SaveProviderKey: %v", err)
-	}
 	t.Setenv("MINI_OPENCODE_TEST_KEY_SOURCE", "sk-env")
 
 	cases := []struct {
@@ -525,13 +483,12 @@ func TestProviderKeySource(t *testing.T) {
 		{name: "echo", cfg: ProviderConfig{Name: "echo"}, want: "n/a"},
 		{name: "inline", cfg: ProviderConfig{Name: "relay", APIKey: "sk"}, want: "config"},
 		{name: "env", cfg: ProviderConfig{Name: "relay", APIKeyEnv: "MINI_OPENCODE_TEST_KEY_SOURCE"}, want: "env"},
-		{name: "stored", cfg: ProviderConfig{Name: "stored"}, want: "secrets"},
 		{name: "missing", cfg: ProviderConfig{Name: "nothing"}, want: "missing"},
 		{name: "env unset", cfg: ProviderConfig{Name: "nothing", APIKeyEnv: "MINI_OPENCODE_TEST_UNSET"}, want: "未设置"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.cfg.KeySource(dir)
+			got := tc.cfg.KeySource()
 			if !strings.Contains(got, tc.want) {
 				t.Fatalf("KeySource() = %q, want it to contain %q", got, tc.want)
 			}
@@ -540,17 +497,15 @@ func TestProviderKeySource(t *testing.T) {
 }
 
 func TestProviderSummary(t *testing.T) {
-	dir := t.TempDir()
-
 	relay := ProviderConfig{Name: "relay", Label: "中转", BaseURL: "https://relay.example.com/v1", Model: "gpt-4o"}
-	summary := relay.Summary(dir)
+	summary := relay.Summary()
 	for _, want := range []string{"中转", "relay", "https://relay.example.com/v1", "gpt-4o", "key=missing"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("Summary() = %q, missing %q", summary, want)
 		}
 	}
 	echo := ProviderConfig{Name: "echo", Type: "echo"}
-	if got := echo.Summary(dir); !strings.Contains(got, "本地回显") {
+	if got := echo.Summary(); !strings.Contains(got, "本地回显") {
 		t.Fatalf("echo Summary() = %q", got)
 	}
 }
@@ -914,26 +869,24 @@ func TestSetProviderContextWindow(t *testing.T) {
 }
 
 func TestProviderSummaryShowsTheWindowAndMarksAGuess(t *testing.T) {
-	dir := t.TempDir()
-
 	known := ProviderConfig{Name: "relay", BaseURL: "https://relay.example.com/v1", Model: "gpt-4o"}
-	if got := known.Summary(dir); !strings.Contains(got, "128k") || strings.Contains(got, "估") {
+	if got := known.Summary(); !strings.Contains(got, "128k") || strings.Contains(got, "估") {
 		t.Fatalf("known window Summary() = %q", got)
 	}
 
 	guessed := ProviderConfig{Name: "relay", BaseURL: "https://relay.example.com/v1", Model: "qwen3:30b"}
-	if got := guessed.Summary(dir); !strings.Contains(got, "估") {
+	if got := guessed.Summary(); !strings.Contains(got, "估") {
 		t.Fatalf("guessed window Summary() = %q, want it marked", got)
 	}
 
 	explicit := ProviderConfig{Name: "relay", BaseURL: "https://relay.example.com/v1", Model: "qwen3:30b", ContextWindow: 200000}
-	got := explicit.Summary(dir)
+	got := explicit.Summary()
 	if !strings.Contains(got, "200k") || strings.Contains(got, "估") {
 		t.Fatalf("explicit window Summary() = %q", got)
 	}
 
 	echoes := ProviderConfig{Name: "echo", Type: ProviderTypeEcho}
-	if got := echoes.Summary(dir); strings.Contains(got, "窗口") {
+	if got := echoes.Summary(); strings.Contains(got, "窗口") {
 		t.Fatalf("echo Summary() = %q, want no window segment", got)
 	}
 }

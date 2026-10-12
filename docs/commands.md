@@ -7,9 +7,10 @@ is not a terminal (`app.Run`); the TUI is used otherwise (`app.RunTUI`).
 | --- | --- | --- | --- |
 | `/permissions [ask\|auto-review\|full-access [confirm]]` | ✅ | ✅ | 查看或切换权限模式（完全信任 / 替我审核 / 请求批准）；完全信任必须显式确认。 |
 | `/provider [name]` | ✅ | ✅ | `providers` 目录：列出（标出激活项与密钥来源）或切换到某个提供商。仅本次进程生效。 |
-| `/provider add <name> <base_url> [model]` | ✅ | ✅ | 带参数：新增或就地更新提供商并写入 `config.json`。不带参数（TUI）：打开三框表单。 |
+| `/provider add <name> <base_url> [model]` | ✅ | ✅ | 带参数：新增或就地更新提供商并写入全局 `~/.mini-opencode/config.json`。不带参数（TUI）：打开三框表单。 |
 | `/model [id]` | ✅ | ✅ | 列出当前提供商的模型或切换模型；未列出的 id 也接受。仅本次进程生效。 |
-| `/model refresh` | ✅ | ✅ | 向当前提供商请求 `/models`：拉回全部模型（含厂商上报的上下文窗口），TUI 里多选勾选，CLI 取并集写入 `config.json`。 |
+| `/model context [tokens\|1M\|128K\|auto]` | ✅ | ✅ | 查看或保存当前提供商的上下文窗口，立即生效并保留对话；TUI 模型菜单按 `c` 填写。 |
+| `/model refresh` | ✅ | ✅ | 向当前提供商请求 `/models`：拉回全部模型（含厂商上报的上下文窗口），TUI 里多选勾选，CLI 取并集写入全局 `~/.mini-opencode/config.json`。 |
 | `/status` | ✅ | ✅ | Workspace, git branch, mode, provider（含 `window`）, session, context estimate (split into system prompt vs conversation), provider-reported tokens, session-approved tools, todo list。窗口是估值时会额外说明怎么修。 |
 | `/skills` | ✅ | — | List installed skills and curated names. |
 | `/mcp` | ✅ | ✅ | Per-server MCP status: disabled, running (tool count), or the startup error. |
@@ -84,7 +85,7 @@ scripts and muscle memory — the picker is an addition, not a replacement.
 ╭──────────────────────────────────────────────────────────────╮
 │ provider:  ↑↓ select · enter switch · esc cancel             │
 │ ▶ * relay  我的中转  https://relay.example.com/v1  …  key=config
-│     deepseek  https://api.deepseek.com  …  key=secrets       │
+│     deepseek  https://api.deepseek.com  …  key=env:DEEPSEEK_API_KEY │
 │     echo  本地回显，无需密钥                                  │
 │ 切换仅本次进程生效；新增用 /provider add <name> <base_url> [model]
 ╰──────────────────────────────────────────────────────────────╯
@@ -101,8 +102,9 @@ scripts and muscle memory — the picker is an addition, not a replacement.
 - 切换会重建 runtime，但**对话、token 统计、压缩标记、system prompt 都保留**
   （`Runtime.AdoptStateFrom`）。构建失败（例如新提供商还没密钥）时旧 runtime 继续服务，
   配置停在新的提供商上，所以紧接着补上的密钥（`/provider add` 同名条目）正好写到正确的名字下。
-- `add` 写 `config.json`；`switch` 与 `/model` 不写（仅本次进程生效）。
-- 每条 provider 行都带 `key=config|env:NAME|secrets|missing`，这行就是「为什么切换失败」的答案。
+- `add`、`/model refresh`、`/model context` 写全局 `~/.mini-opencode/config.json`；`switch`
+  与 `/model <id>` 不写（仅本次进程生效）。
+- 每条 provider 行都带 `key=config|env:NAME|missing`，这行就是「为什么切换失败」的答案。
 
 ### Multiline input
 
@@ -125,12 +127,19 @@ Enabling mouse reporting (so the wheel arrives as exact events instead of being
 translated by the terminal) takes drag-to-select away from the terminal, so
 selection is implemented in the program: drag with the left button over the
 transcript or the input box, and the selected text is copied to the system
-clipboard on release via `pbcopy`.
+clipboard on release through the host clipboard API (macOS pasteboard or the
+Windows clipboard).
 
-The extracted text is taken from the rendered frame, so it is what you actually
-see — no ANSI escapes, no box borders, no trailing padding. A click without a
-drag clears the selection instead of copying one character, and the selection is
-also cleared on `esc` and when you send a message.
+Transcript selections are anchored to rendered conversation rows: scrolling moves
+highlights with the text, and copying includes selected rows outside the visible
+viewport. While holding the left mouse button, drag to the top or bottom edge of
+the transcript to scroll continuously. Moving back inside, releasing, or reaching
+the end stops scrolling. The input and footer are excluded from transcript drags.
+
+Copying uses the viewport renderer, preserving wrapping and terminal-cell columns
+(including Chinese text), without ANSI escapes. A click without a drag clears the
+selection. Resizing clears it because text wrapping can change; `esc` and sending
+a message also clear it.
 
 ### The task panel
 
@@ -178,7 +187,7 @@ discoverable.
 未知值、错误参数不会改变模式。切换仅限前台空闲时，成功切换会清空旧的 always-allow 工具授权。
 
 模式在本进程内跨会话、配置密钥后的 runtime 重建保持，不写回配置，退出后恢复
-`config.json` 中的 `permissions.mode`（缺省 `ask`）。显式配置 `full-access` 表示用户已同意在启动时启用。
+项目配置 `<project>/.mini-opencode/config.json` 中的 `permissions.mode`（缺省 `ask`）。显式配置 `full-access` 表示用户已同意在启动时启用。
 `/status` 报告模式；TUI 顶栏空间不足时省略徽标，完整信息仍可用命令查看。
 
 **无操作系统级沙箱**：shell 启动文件、shell 内的路径访问和网络连接不受系统级隔离。
@@ -233,7 +242,7 @@ failures (429/5xx/network) are already retried inside the provider first.
 ## Context budget
 
 The runtime compacts the conversation automatically when the remaining room in
-`provider.context_window` gets small. The run prints/streams a
+`providers[].context_window` gets small. The run prints/streams a
 `context auto-compacted` notice and continues.
 
 The trigger is expressed as remaining headroom rather than a fraction already
@@ -270,7 +279,8 @@ raise the limit, or compact.
 
 ```json
 {
-  "provider": { "context_window": 128000 },
+  "providers": [{ "name": "deepseek", "model": "deepseek-chat", "api_key_env": "DEEPSEEK_API_KEY", "context_window": 128000 }],
+  "active_provider": "deepseek",
   "agent": { "max_turns": 200, "compact_threshold": 0.85 }
 }
 ```

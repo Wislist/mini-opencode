@@ -9,7 +9,6 @@ import (
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/config"
-	"github.com/wislist/mini-opencode/internal/session"
 )
 
 // The context/version indicator lives in the header's right-hand side, and the
@@ -36,7 +35,7 @@ func statusTestModel(t *testing.T, w, h int) *Model {
 // indicator has both a system floor and a conversation to report.
 func withConversation(t *testing.T, m *Model) *Model {
 	t.Helper()
-	m.SetSessionStore(session.NewStore(t.TempDir()))
+	m.SetSessionStore(newTestSessionStore(t, t.TempDir()))
 	m.currentSession = m.sessions.Create("t")
 	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}, agent.WithContextWindow(128000)))
 	m.runtime.SetMessages([]agent.Message{{Role: agent.RoleUser, Content: strings.Repeat("x", 400)}})

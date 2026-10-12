@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 // plus the local echo provider.
 func providerTestConfig(t *testing.T) config.Config {
 	t.Helper()
+	setTestHome(t, filepath.Join(t.TempDir(), "home"))
 	cfg := config.Default()
 	if err := cfg.AddProvider(config.ProviderConfig{
 		Name:    "relay",
@@ -201,13 +203,16 @@ func TestProviderAddFromTUIWritesConfigAndRebuilds(t *testing.T) {
 	if m.cfg.Provider.Name != "backup" {
 		t.Fatalf("新增的 provider 未生效: %q", m.cfg.Provider.Name)
 	}
-	if _, err := config.Load(m.workingDir + "/config.json"); err != nil {
+	if _, err := config.LoadWorkspace(m.workingDir); err != nil {
 		t.Fatalf("config.json 未写入: %v", err)
+	}
+	if joined := strings.Join(m.blocks, "\n"); strings.Contains(joined, "/key") {
+		t.Fatalf("新增 provider 后仍推荐已删除的 /key: %q", joined)
 	}
 }
 
 // 构建失败（例如新 provider 还没有密钥）时保留旧 runtime，但配置要停在新的
-// provider 上，这样紧接着的 /key 才能把密钥存到正确的名字下。
+// provider 上，这样紧接着的 /provider add 才能更新正确的目录项。
 func TestProviderRebuildFailureKeepsRuntimeAndConfig(t *testing.T) {
 	m := providerTestModel(t)
 	old := agent.NewRuntime(agent.EchoProvider{})
@@ -223,7 +228,7 @@ func TestProviderRebuildFailureKeepsRuntimeAndConfig(t *testing.T) {
 		t.Fatal("构建失败却换掉了 runtime")
 	}
 	if m.cfg.Provider.Name != "echo" {
-		t.Fatalf("provider = %q, want echo（后续 /key 要写在这个名字下）", m.cfg.Provider.Name)
+		t.Fatalf("provider = %q, want echo（后续 /provider add 要更新这个目录项）", m.cfg.Provider.Name)
 	}
 	if joined := strings.Join(m.blocks, "\n"); !strings.Contains(joined, "api key is required") {
 		t.Fatalf("失败原因没有显示: %q", joined)

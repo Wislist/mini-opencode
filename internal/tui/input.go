@@ -10,6 +10,8 @@ import (
 	"github.com/wislist/mini-opencode/internal/agent"
 )
 
+const runtimeUnavailableMessage = "no runtime available. use /provider add to configure one, or /provider to switch."
+
 func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 	switch {
 	case input == "/quit" || input == "/exit" || input == "quit" || input == "exit":
@@ -53,7 +55,7 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 	}
 
 	if m.runtime == nil {
-		m.addBlock(errorStyle.Render("no runtime available. use /key to configure."))
+		m.addBlock(errorStyle.Render(runtimeUnavailableMessage))
 		m.refreshViewport()
 		return m, nil
 	}
@@ -116,7 +118,7 @@ func (m *Model) startDistill() tea.Cmd {
 // agent can create or refresh AGENTS.md, then restores the normal prompt.
 func (m *Model) startInit() (tea.Model, tea.Cmd) {
 	if m.runtime == nil {
-		m.addBlock(errorStyle.Render("no runtime available. use /key to configure."))
+		m.addBlock(errorStyle.Render(runtimeUnavailableMessage))
 		m.refreshViewport()
 		return m, nil
 	}
@@ -177,7 +179,7 @@ func (m *Model) handleUndo() (tea.Model, tea.Cmd) {
 
 func (m *Model) startCompact() (tea.Model, tea.Cmd) {
 	if m.runtime == nil {
-		m.addBlock(errorStyle.Render("no runtime available. use /key to configure."))
+		m.addBlock(errorStyle.Render(runtimeUnavailableMessage))
 		m.refreshViewport()
 		return m, nil
 	}
