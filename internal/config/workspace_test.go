@@ -294,7 +294,7 @@ func TestWorkspaceConfigDefaultsAndSaveFailure(t *testing.T) {
 	if _, err := os.Stat(WorkspacePath(dir)); !os.IsNotExist(err) {
 		t.Fatal("read created config")
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".mini-opencode"), []byte("blocked"), 0600); err != nil {
+	if err := os.MkdirAll(WorkspacePath(dir), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := Save(WorkspacePath(dir), cfg); err == nil {
