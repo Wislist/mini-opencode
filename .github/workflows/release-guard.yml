@@ -1,0 +1,24 @@
+name: Guard release branch
+
+on:
+  pull_request:
+    branches:
+      - release
+
+permissions:
+  contents: read
+
+jobs:
+  source-branch:
+    name: Only main can update release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify pull request source
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [[ "$HEAD_REF" != "main" ]]; then
+            echo "release only accepts pull requests from main; got $HEAD_REF" >&2
+            exit 1
+          fi

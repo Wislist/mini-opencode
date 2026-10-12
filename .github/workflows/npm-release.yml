@@ -1,0 +1,149 @@
+name: Publish npm packages
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require release branch history
+        shell: bash
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/release; then
+            echo "tag $GITHUB_REF_NAME must point to a commit contained in the release branch" >&2
+            exit 1
+          fi
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          base="$(sed -n 's/^var version = "\(.*\)"$/\1/p' internal/app/app.go | head -1)"
+          if [[ -z "$version" || "$version" != "$base" ]]; then
+            echo "tag version $version does not match source version $base" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: verify
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            artifact: mini-opencode-darwin-arm64
+          - goos: darwin
+            goarch: amd64
+            artifact: mini-opencode-darwin-x64
+          - goos: windows
+            goarch: arm64
+            artifact: mini-opencode-win32-arm64.exe
+          - goos: windows
+            goarch: amd64
+            artifact: mini-opencode-win32-x64.exe
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build native binary
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${{ needs.verify.outputs.version }}" \
+            -o "dist/${{ matrix.artifact }}" \
+            ./cmd/mini-opencode
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish npm
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install OIDC-capable npm CLI
+        run: npm install --global npm@^11.5.1
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Prepare packages
+        shell: bash
+        run: |
+          node scripts/prepare-npm-release.mjs \
+            --version "${{ needs.verify.outputs.version }}" \
+            --artifacts dist \
+            --out .npm-release
+      - name: Verify package contents
+        shell: bash
+        run: |
+          for package in .npm-release/darwin-arm64 .npm-release/darwin-x64 .npm-release/win32-arm64 .npm-release/win32-x64 .npm-release/wrapper; do
+            npm pack "$package" --dry-run
+          done
+      - name: Publish platform packages
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -n "$NPM_TOKEN" ]]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+          fi
+          for package in darwin-arm64 darwin-x64 win32-arm64 win32-x64; do
+            name="$(node -p "require('./.npm-release/$package/package.json').name")"
+            version="$(node -p "require('./.npm-release/$package/package.json').version")"
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published; skipping"
+            else
+              npm publish ".npm-release/$package" --access public --provenance
+            fi
+          done
+      - name: Publish wrapper package
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -n "$NPM_TOKEN" ]]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+          fi
+          name="$(node -p "require('./.npm-release/wrapper/package.json').name")"
+          version="$(node -p "require('./.npm-release/wrapper/package.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already published; skipping"
+          else
+            npm publish .npm-release/wrapper --access public --provenance
+          fi

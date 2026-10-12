@@ -9,6 +9,8 @@ config.json
 cmd/mini-opencode/mini-opencode
 /mini-opencode
 /bin/
+/.npm-release/
+/dist/
 
 # macOS noise.
 .DS_Store

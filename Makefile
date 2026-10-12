@@ -74,8 +74,12 @@ fmt-check: ## Fail if any file is not gofmt-clean
 	@out=$$(gofmt -l internal cmd); \
 	if [ -n "$$out" ]; then echo "not gofmt-clean:"; echo "$$out"; exit 1; fi
 
+.PHONY: npm-test
+npm-test: ## Run npm wrapper and release packaging tests
+	cd npm && npm test
+
 .PHONY: check
-check: fmt-check vet test ## Format check, vet, and test
+check: fmt-check vet test npm-test ## Format check, vet, Go tests, and npm packaging tests
 
 .PHONY: clean
 clean: ## Remove build output
