@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -179,8 +180,13 @@ func TestNormalizeAllowedRootsDedupesAndCleans(t *testing.T) {
 func TestLoadNormalizesAllowedRoots(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	cfgJSON := `{"workspace":{"allowed_roots":["` + dir + `","` + dir + `/"]}}`
-	if err := os.WriteFile(path, []byte(cfgJSON), 0644); err != nil {
+	cfgJSON, err := json.Marshal(map[string]any{
+		"workspace": map[string]any{"allowed_roots": []string{dir, dir + string(os.PathSeparator)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, cfgJSON, 0644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)

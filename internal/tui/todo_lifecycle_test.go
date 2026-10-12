@@ -9,7 +9,6 @@ import (
 
 	"github.com/wislist/mini-opencode/internal/agent"
 	"github.com/wislist/mini-opencode/internal/config"
-	"github.com/wislist/mini-opencode/internal/session"
 )
 
 func todoTestModel(t *testing.T) *Model {
@@ -207,7 +206,7 @@ func TestCtrlTIdempotentOnTranscript(t *testing.T) {
 // TestCompletedTodosDoNotCarryIntoNextTurn 断言已完成的列表在新的一轮里不再出现。
 func TestCompletedTodosDoNotCarryIntoNextTurn(t *testing.T) {
 	m := todoTestModel(t)
-	m.SetSessionStore(session.NewStore(t.TempDir()))
+	m.SetSessionStore(newTestSessionStore(t, t.TempDir()))
 	m.currentSession = m.sessions.Create("t")
 	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
 
@@ -224,7 +223,7 @@ func TestCompletedTodosDoNotCarryIntoNextTurn(t *testing.T) {
 // 需求明确要求「无论已完成还是未完成都不应继续带着」。
 func TestIncompleteTodosDoNotCarryIntoNextTurn(t *testing.T) {
 	m := todoTestModel(t)
-	m.SetSessionStore(session.NewStore(t.TempDir()))
+	m.SetSessionStore(newTestSessionStore(t, t.TempDir()))
 	m.currentSession = m.sessions.Create("t")
 	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
 
@@ -240,7 +239,7 @@ func TestIncompleteTodosDoNotCarryIntoNextTurn(t *testing.T) {
 // 中断时列表停在 [>]/[ ]，下一轮不应该还挂着。
 func TestInterruptedTodosDoNotCarryIntoNextTurn(t *testing.T) {
 	m := todoTestModel(t)
-	m.SetSessionStore(session.NewStore(t.TempDir()))
+	m.SetSessionStore(newTestSessionStore(t, t.TempDir()))
 	m.currentSession = m.sessions.Create("t")
 	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
 
@@ -263,7 +262,7 @@ func TestInterruptedTodosDoNotCarryIntoNextTurn(t *testing.T) {
 // agent 干活时必须能看到进度。
 func TestTodoDuringSameRunStillShows(t *testing.T) {
 	m := todoTestModel(t)
-	m.SetSessionStore(session.NewStore(t.TempDir()))
+	m.SetSessionStore(newTestSessionStore(t, t.TempDir()))
 	m.currentSession = m.sessions.Create("t")
 	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
 
@@ -285,7 +284,7 @@ func TestTodoDuringSameRunStillShows(t *testing.T) {
 func TestClearedTodosSurviveSessionReload(t *testing.T) {
 	dir := t.TempDir()
 	m := todoTestModel(t)
-	store := session.NewStore(dir)
+	store := newTestSessionStore(t, dir)
 	m.SetSessionStore(store)
 	m.currentSession = store.Create("t")
 	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))

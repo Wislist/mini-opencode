@@ -15,7 +15,7 @@ import (
 func undoFixture(t *testing.T) (*session.Store, string, string) {
 	t.Helper()
 	dir := t.TempDir()
-	store := session.NewStore(dir)
+	store := newTestSessionStore(t, dir)
 	sess := store.Create("undo")
 	if err := store.Save(sess); err != nil {
 		t.Fatalf("Save() error = %v", err)

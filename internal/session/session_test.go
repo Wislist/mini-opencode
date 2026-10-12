@@ -14,7 +14,7 @@ import (
 
 func TestStoreCreateSaveLoad(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 
 	sess := store.Create("test conversation")
 	if sess.ID == "" {
@@ -44,9 +44,27 @@ func TestStoreCreateSaveLoad(t *testing.T) {
 	}
 }
 
-func TestStoreListNewestFirst(t *testing.T) {
+func TestStoreCloseReleasesDatabaseAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	sess := store.Create("close")
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if err := os.Remove(store.dbPath); err != nil {
+		t.Fatalf("remove database after Close(): %v", err)
+	}
+}
+
+func TestStoreListNewestFirst(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestStore(t, dir)
 
 	older := store.Create("older")
 	older.CreatedAt = time.Now().Add(-2 * time.Hour)
@@ -78,7 +96,7 @@ func TestStoreListNewestFirst(t *testing.T) {
 }
 
 func TestStoreListEmptyDir(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "nonexistent"))
+	store := newTestStore(t, filepath.Join(t.TempDir(), "nonexistent"))
 	metas, err := store.List()
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
@@ -90,7 +108,7 @@ func TestStoreListEmptyDir(t *testing.T) {
 
 func TestStoreDelete(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 
 	sess := store.Create("to delete")
 	if err := store.Save(sess); err != nil {
@@ -141,7 +159,7 @@ func TestRuntimeSetMessages(t *testing.T) {
 	// This tests the agent.Runtime.SetMessages method via the session package
 	// round-trip, ensuring messages survive serialization.
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 	sess := store.Create("roundtrip")
 	sess.Messages = []agent.Message{
 		{Role: agent.RoleUser, Content: "q", ToolCallID: ""},
@@ -166,7 +184,7 @@ func TestRuntimeSetMessages(t *testing.T) {
 
 func TestStoreArchiveExportsJSONAndDeletesActiveSession(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 
 	sess := store.Create("archive me")
 	sess.Messages = []agent.Message{{Role: agent.RoleUser, Content: "please save this"}}
@@ -199,7 +217,7 @@ func TestStoreArchiveExportsJSONAndDeletesActiveSession(t *testing.T) {
 
 func TestStoreListArchivesExpiredSessions(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 	now := time.Now()
 
 	old := store.Create("expired")
@@ -244,7 +262,7 @@ func TestStoreListArchivesExpiredSessions(t *testing.T) {
 
 func TestStoreImportsLegacyJSONOnlyOnce(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 	legacy := &Session{
 		ID:        "legacy-1",
 		Title:     "legacy",
@@ -284,7 +302,7 @@ func TestStoreImportsLegacyJSONOnlyOnce(t *testing.T) {
 
 func TestStoreUsesCrushStyleSchemaAndTypedMessageParts(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 
 	sess := store.Create("typed parts")
 	sess.ParentSessionID = ""
@@ -332,7 +350,7 @@ func TestStoreUsesCrushStyleSchemaAndTypedMessageParts(t *testing.T) {
 
 func TestStoreDeleteCascadesMessagesFilesAndReadFiles(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 	sess := store.Create("cascade")
 	sess.Messages = []agent.Message{{Role: agent.RoleUser, Content: "read a.go"}}
 	if err := store.Save(sess); err != nil {
@@ -363,7 +381,7 @@ func TestStoreDeleteCascadesMessagesFilesAndReadFiles(t *testing.T) {
 
 func TestStorePublishesCreateUpdateDeleteEvents(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 	events, cancel := store.Subscribe()
 	defer cancel()
 
@@ -398,7 +416,7 @@ func assertSessionEvent(t *testing.T, events <-chan Event, typ EventType, id str
 }
 
 func TestForkCopiesTranscriptAndRecordsParent(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	src := store.Create("fix the parser")
 	src.Messages = []agent.Message{
 		{Role: agent.RoleUser, Content: "help me"},
@@ -474,7 +492,7 @@ func TestForkCopiesTranscriptAndRecordsParent(t *testing.T) {
 }
 
 func TestLoadTodosAndSaveTodos(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	sess := store.Create("todos")
 	if err := store.Save(sess); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -494,7 +512,7 @@ func TestLoadTodosAndSaveTodos(t *testing.T) {
 }
 
 func TestSnapshotFileAndLatestSnapshot(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	sess := store.Create("snapshots")
 	if err := store.Save(sess); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -532,7 +550,7 @@ func TestSnapshotFileAndLatestSnapshot(t *testing.T) {
 // triggers; opening it must drop them so saving stays linear.
 func TestStoreDropsRetiredMessageCountTriggers(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir)
+	store := newTestStore(t, dir)
 	if err := store.Save(store.Create("legacy")); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
@@ -551,7 +569,7 @@ func TestStoreDropsRetiredMessageCountTriggers(t *testing.T) {
 	}
 	store.mu.Unlock()
 
-	reopened := NewStore(dir)
+	reopened := newTestStore(t, dir)
 	if err := reopened.Save(reopened.Create("after migration")); err != nil {
 		t.Fatalf("Save() on reopened store error = %v", err)
 	}
@@ -571,7 +589,7 @@ func TestStoreDropsRetiredMessageCountTriggers(t *testing.T) {
 // Saving an unchanged prefix must not rewrite it: that is the whole point of
 // the incremental writer.
 func TestStoreIncrementalMessageWriteKeepsUntouchedRows(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	sess := store.Create("incremental")
 	sess.Messages = []agent.Message{
 		{Role: agent.RoleUser, Content: "first"},
@@ -632,7 +650,7 @@ func TestStoreIncrementalMessageWriteKeepsUntouchedRows(t *testing.T) {
 // Shrinking the transcript (a compact) must prune the rows that no longer
 // exist, and keep message_count in step.
 func TestStorePrunesMessagesAfterCompaction(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	sess := store.Create("compact")
 	for i := 0; i < 5; i++ {
 		sess.Messages = append(sess.Messages, agent.Message{Role: agent.RoleUser, Content: "message"})
@@ -676,7 +694,7 @@ func TestStorePrunesMessagesAfterCompaction(t *testing.T) {
 func BenchmarkStoreSaveAppendingTurn(b *testing.B) {
 	for _, messages := range []int{50, 200, 800} {
 		b.Run(fmt.Sprintf("%d-messages", messages), func(b *testing.B) {
-			store := NewStore(b.TempDir())
+			store := newTestStore(b, b.TempDir())
 			sess := store.Create("bench")
 			for i := 0; i < messages; i++ {
 				sess.Messages = append(sess.Messages, agent.Message{Role: agent.RoleUser, Content: "message body"})

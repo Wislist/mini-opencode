@@ -23,8 +23,9 @@ func TestResolveWorkspacePathRootsAllowsAllowedRoot(t *testing.T) {
 func TestResolveWorkspacePathRootsDeniesEscape(t *testing.T) {
 	workDir := t.TempDir()
 	extra := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
 
-	_, err := resolveWorkspacePathRoots(workDir, []string{extra}, "/etc/hosts")
+	_, err := resolveWorkspacePathRoots(workDir, []string{extra}, outside)
 	if err == nil {
 		t.Fatal("expected escape error, got nil")
 	}

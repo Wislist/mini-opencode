@@ -19,7 +19,12 @@ func writeJSONFile(t *testing.T, path string, value string) {
 
 func TestLoadWorkspaceMergesGlobalAndProjectConfig(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
+	globalRoot := filepath.Join(t.TempDir(), "global-root")
+	globalRootJSON, err := json.Marshal(globalRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	project := t.TempDir()
 	if err := os.Mkdir(filepath.Join(project, ".git"), 0700); err != nil {
 		t.Fatal(err)
@@ -28,7 +33,7 @@ func TestLoadWorkspaceMergesGlobalAndProjectConfig(t *testing.T) {
   "providers": [{"name":"relay","base_url":"https://relay.example.com/v1","model":"gpt-4o","api_key":"sk-global"}],
   "active_provider":"relay",
   "agent":{"max_turns":20,"compact_threshold":0.8},
-  "workspace":{"allowed_roots":["/global/root"]}
+  "workspace":{"allowed_roots":[`+string(globalRootJSON)+`]}
 }`)
 	writeJSONFile(t, filepath.Join(project, ".mini-opencode", "config.json"), `{
   "agent":{"max_turns":7},
@@ -53,14 +58,14 @@ func TestLoadWorkspaceMergesGlobalAndProjectConfig(t *testing.T) {
 	if !cfg.Memory.HybridEnabled() {
 		t.Fatal("project memory override was not applied")
 	}
-	if len(cfg.Workspace.AllowedRoots) != 1 || cfg.Workspace.AllowedRoots[0] != "/global/root" {
+	if len(cfg.Workspace.AllowedRoots) != 1 || cfg.Workspace.AllowedRoots[0] != filepath.Clean(globalRoot) {
 		t.Fatalf("global workspace fields were not preserved: %+v", cfg.Workspace.AllowedRoots)
 	}
 }
 
 func TestLoadWorkspaceProjectCannotOverrideProviderCatalogOrKey(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	project := t.TempDir()
 	if err := os.Mkdir(filepath.Join(project, ".git"), 0700); err != nil {
 		t.Fatal(err)
@@ -94,7 +99,7 @@ func TestLoadWorkspaceProjectCannotOverrideProviderCatalogOrKey(t *testing.T) {
 }
 
 func TestLoadWorkspaceIgnoresProjectProviderWithoutGlobalCatalog(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	project := t.TempDir()
 	writeJSONFile(t, WorkspacePath(project), `{
   "providers": [{"name":"project","base_url":"https://project.example.com/v1","model":"project-model","api_key":"sk-project"}],
@@ -117,7 +122,7 @@ func TestLoadWorkspaceIgnoresProjectProviderWithoutGlobalCatalog(t *testing.T) {
 
 func TestLoadWorkspaceFindsNearestProjectConfigWithinGitRoot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	repo := t.TempDir()
 	if err := os.Mkdir(filepath.Join(repo, ".git"), 0700); err != nil {
 		t.Fatal(err)
@@ -161,7 +166,7 @@ func TestLoadWorkspaceFindsNearestProjectConfigWithinGitRoot(t *testing.T) {
 
 func TestLoadWorkspaceIgnoresLegacyRootConfig(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	project := t.TempDir()
 	writeJSONFile(t, filepath.Join(home, ".mini-opencode", "config.json"), `{"memory":{"top_k":2}}`)
 	writeJSONFile(t, filepath.Join(project, "config.json"), `{"memory":{"top_k":99},"providers":[{"name":"legacy","api_key":"sk-legacy"}]}`)
@@ -180,7 +185,7 @@ func TestLoadWorkspaceIgnoresLegacyRootConfig(t *testing.T) {
 
 func TestLoadWorkspaceProjectCannotRelaxGlobalPermissionMode(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	project := t.TempDir()
 	if err := os.Mkdir(filepath.Join(project, ".git"), 0700); err != nil {
 		t.Fatal(err)
@@ -199,7 +204,7 @@ func TestLoadWorkspaceProjectCannotRelaxGlobalPermissionMode(t *testing.T) {
 
 func TestSaveProviderCatalogOnlyUpdatesGlobalProviderFields(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	globalPath, err := GlobalConfigPath()
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +252,7 @@ func TestSaveProviderCatalogOnlyUpdatesGlobalProviderFields(t *testing.T) {
 
 func TestWorkspaceConfigPaths(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "config.json")
 	original := []byte(`{"providers":[{"name":"legacy","api_key":"sk-legacy"}],"memory":{"top_k":88}}`)
@@ -280,7 +285,7 @@ func TestWorkspaceConfigPaths(t *testing.T) {
 }
 
 func TestWorkspaceConfigDefaultsAndSaveFailure(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	dir := t.TempDir()
 	cfg, err := LoadWorkspace(dir)
 	if err != nil || len(cfg.Providers) == 0 {

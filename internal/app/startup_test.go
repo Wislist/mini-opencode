@@ -137,7 +137,7 @@ func TestApplyProviderCommandReportsWriteFailure(t *testing.T) {
 	if err := os.WriteFile(blockedHome, []byte("blocked"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", blockedHome)
+	setTestHome(t, blockedHome)
 	res := applyProviderCommand(&cfg, dir, "/provider add backup https://backup.example.com/v1")
 	if res.Changed || res.Saved {
 		t.Fatalf("failed write reported as success: %+v", res)

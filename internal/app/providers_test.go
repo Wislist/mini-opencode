@@ -18,7 +18,7 @@ import (
 func loadConfig(t *testing.T, body string) (config.Config, string) {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("HOME", filepath.Join(dir, "home"))
+	setTestHome(t, filepath.Join(dir, "home"))
 	if body != "" {
 		path, err := config.GlobalConfigPath()
 		if err != nil {
@@ -706,9 +706,9 @@ func TestPrintStatusSkipsTheWindowForEcho(t *testing.T) {
 }
 
 func TestModelContextCLI(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	dir := t.TempDir()
-	t.Setenv("HOME", filepath.Join(dir, "home"))
+	setTestHome(t, filepath.Join(dir, "home"))
 	cfg, err := config.LoadWorkspace(dir)
 	if err != nil {
 		t.Fatal(err)

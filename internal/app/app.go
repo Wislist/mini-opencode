@@ -52,6 +52,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	// The session store and file observer must exist before the runtime is
 	// built: the coding tools need the observer to record reads and snapshots.
 	sessions := session.NewStore(workingDir)
+	defer sessions.Close()
 	currentSession := sessions.Create("new session")
 	observer := newSessionFileObserver(sessions, func() string { return currentSession.ID })
 	todos := newSessionTodoStore(sessions, func() string { return currentSession.ID })

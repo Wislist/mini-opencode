@@ -59,6 +59,7 @@ func RunTUI(ctx context.Context) error {
 	model.SetPlanHook(planHook)
 
 	sessionStore := session.NewStore(workingDir)
+	defer sessionStore.Close()
 	model.SetSessionStore(sessionStore)
 	observer := newSessionFileObserver(sessionStore, model.CurrentSessionID)
 	todos := newSessionTodoStore(sessionStore, model.CurrentSessionID)

@@ -16,7 +16,7 @@ import (
 // plus the local echo provider.
 func providerTestConfig(t *testing.T) config.Config {
 	t.Helper()
-	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	setTestHome(t, filepath.Join(t.TempDir(), "home"))
 	cfg := config.Default()
 	if err := cfg.AddProvider(config.ProviderConfig{
 		Name:    "relay",
