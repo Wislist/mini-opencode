@@ -1,10 +1,12 @@
 package tui
 
 import (
-	"os/exec"
+	"charm.land/lipgloss/v2"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -16,10 +18,10 @@ import (
 // and motion is delivered to us, so "select some output and copy it" — which
 // used to be the terminal's job — has to be implemented here.
 //
-// Selection is modelled in screen cells and resolved against the rendered frame,
-// so the extracted text is what the user actually sees: no ANSI escapes, no box
-// borders, no padding beyond the selection. The copied string goes to the
-// system clipboard through pbcopy.
+// Transcript selections use rendered content rows and terminal cell columns,
+// so scrolling moves the highlight with its text. Other UI selections use screen
+// coordinates. Copying uses the same renderer, including offscreen transcript rows. The copied string goes to the
+// system clipboard through the host clipboard API.
 
 // selPoint is a position in terminal cells, 0-based.
 type selPoint struct {
@@ -30,9 +32,12 @@ type selPoint struct {
 // selection is one drag. start and end are stored as dragged, and normalized
 // for reading so a right-to-left or bottom-to-top drag works the same way.
 type selection struct {
-	active bool
-	start  selPoint
-	end    selPoint
+	active     bool
+	transcript bool
+	holding    bool
+	pointer    selPoint
+	start      selPoint
+	end        selPoint
 	// dragged distinguishes a click from a drag: releasing without moving
 	// clears the selection instead of copying a single character.
 	dragged bool
@@ -50,20 +55,17 @@ func normalizeSelection(a, b selPoint) selection {
 // ClipboardWriter receives the text to place on the system clipboard.
 type ClipboardWriter func(text string) error
 
-// pbcopyClipboard writes to the macOS pasteboard. The project targets macOS
-// only, so pbcopy is always present; a failure is reported to the caller rather
-// than being silently swallowed.
-func pbcopyClipboard(text string) error {
-	cmd := exec.Command("pbcopy")
-	cmd.Stdin = strings.NewReader(text)
-	return cmd.Run()
+// systemClipboard writes Unicode text through the native macOS or Windows
+// clipboard implementation selected by the clipboard package.
+func systemClipboard(text string) error {
+	return clipboard.WriteAll(text)
 }
 
 // SetClipboardWriter overrides how copied text reaches the clipboard. Tests use
-// it to capture the payload; passing nil restores the real pbcopy writer.
+// it to capture the payload; passing nil restores the native clipboard writer.
 func (m *Model) SetClipboardWriter(w ClipboardWriter) {
 	if w == nil {
-		m.clipboard = pbcopyClipboard
+		m.clipboard = systemClipboard
 		return
 	}
 	m.clipboard = w
@@ -72,6 +74,8 @@ func (m *Model) SetClipboardWriter(w ClipboardWriter) {
 // clearSelection drops the current selection.
 func (m *Model) clearSelection() {
 	m.selection = selection{}
+	m.selectionScrollGeneration++
+	m.selectionScrollPending = false
 }
 
 // selectedText returns the text under the current selection, or "" when there
@@ -80,7 +84,9 @@ func (m *Model) selectedText() string {
 	if !m.selection.active {
 		return ""
 	}
-	return m.selectionText(normalizeSelection(m.selection.start, m.selection.end))
+	sel := normalizeSelection(m.selection.start, m.selection.end)
+	sel.transcript = m.selection.transcript
+	return m.selectionText(sel)
 }
 
 // selectionText extracts the selected text from the rendered frame.
@@ -93,7 +99,17 @@ func (m *Model) selectionText(sel selection) string {
 	if !sel.active || m.width <= 0 || m.height <= 0 {
 		return ""
 	}
-	lines := screenLines(m.renderFrame())
+	var lines []string
+	if sel.transcript {
+		// Render through the viewport itself so wrapping, padding and ANSI handling
+		// agree with the visible transcript, including rows now off screen.
+		viewport := m.viewport
+		viewport.SetHeight(max(1, viewport.TotalLineCount()))
+		viewport.SetYOffset(0)
+		lines = screenLines(viewport.View())
+	} else {
+		lines = screenLines(m.renderFrame())
+	}
 	start, end := sel.start, sel.end
 	start.row = clampInt(start.row, 0, max(0, len(lines)-1))
 	end.row = clampInt(end.row, 0, max(0, len(lines)-1))
@@ -104,17 +120,17 @@ func (m *Model) selectionText(sel selection) string {
 			continue
 		}
 		line := lines[row]
-		from, to := 0, len(line)
+		from, to := 0, ansi.StringWidth(line)
 		if row == start.row {
-			from = clampInt(start.col, 0, len(line))
+			from = clampInt(start.col, 0, ansi.StringWidth(line))
 		}
 		if row == end.row {
-			to = clampInt(end.col, 0, len(line))
+			to = clampInt(end.col, 0, ansi.StringWidth(line))
 		}
 		if from > to {
 			from, to = to, from
 		}
-		out = append(out, strings.TrimRight(line[from:to], " "))
+		out = append(out, strings.TrimRight(ansi.Cut(line, from, to), " "))
 	}
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
 }
@@ -158,22 +174,29 @@ func (m *Model) highlightSelection(view string) string {
 	if len(raw) == 0 {
 		return view
 	}
-	startRow := clampInt(sel.start.row, 0, len(raw)-1)
-	endRow := clampInt(sel.end.row, 0, len(raw)-1)
+	first, last := 0, len(raw)-1
+	if m.selection.transcript {
+		first, last = m.selectionViewportBounds()
+		shift := first - m.viewport.YOffset()
+		sel.start.row += shift
+		sel.end.row += shift
+	}
+	startRow := max(first, sel.start.row)
+	endRow := min(last, sel.end.row)
 	selected := false
 
 	for row := startRow; row <= endRow; row++ {
 		plain := ansi.Strip(raw[row])
-		runes := []rune(plain)
-		if len(runes) == 0 {
+		width := ansi.StringWidth(plain)
+		if width == 0 {
 			continue
 		}
-		from, to := 0, len(runes)
+		from, to := 0, width
 		if row == sel.start.row {
-			from = clampInt(sel.start.col, 0, len(runes))
+			from = clampInt(sel.start.col, 0, width)
 		}
 		if row == sel.end.row {
-			to = clampInt(sel.end.col, 0, len(runes))
+			to = clampInt(sel.end.col, 0, width)
 		}
 		if from > to {
 			from, to = to, from
@@ -184,9 +207,9 @@ func (m *Model) highlightSelection(view string) string {
 		// The text outside the selection must survive: replacing the whole row
 		// with the selected slice silently deleted everything before the drag
 		// start and after the drag end.
-		raw[row] = string(runes[:from]) +
-			selectionStyle.Render(string(runes[from:to])) +
-			string(runes[to:])
+		raw[row] = ansi.Cut(raw[row], 0, from) +
+			selectionStyle.Render(ansi.Cut(plain, from, to)) +
+			ansi.Cut(raw[row], to, width)
 		selected = true
 	}
 	// Recorded so the rest of the program (and tests) can tell a highlighted
@@ -207,21 +230,30 @@ func (m *Model) handleSelectionMouse(msg tea.MouseMsg) bool {
 		if ev.Button != tea.MouseLeft {
 			return false
 		}
-		m.selection = selection{active: true, start: selPoint{row: ev.Y, col: ev.X}, end: selPoint{row: ev.Y, col: ev.X}}
+		m.clearSelection()
+		top, bottom := m.selectionViewportBounds()
+		point := selPoint{row: ev.Y, col: ev.X}
+		m.selection = selection{active: true, holding: true, transcript: ev.Y >= top && ev.Y <= bottom, pointer: point}
+		m.selection.start = m.selectionPoint(point)
+		m.selection.end = m.selection.start
 		return true
 	case tea.MouseMotionMsg:
-		if !m.selection.active {
+		if !m.selection.active || !m.selection.holding {
 			return false
 		}
-		m.selection.end = selPoint{row: ev.Y, col: ev.X}
+		m.selection.pointer = selPoint{row: ev.Y, col: ev.X}
+		m.selection.end = m.selectionPoint(m.selection.pointer)
 		if m.selection.end != m.selection.start {
 			m.selection.dragged = true
 		}
 		return true
 	case tea.MouseReleaseMsg:
-		if !m.selection.active {
+		if ev.Button != tea.MouseLeft || !m.selection.active || !m.selection.holding {
 			return false
 		}
+		m.selection.holding = false
+		m.selectionScrollGeneration++
+		m.selectionScrollPending = false
 		if !m.selection.dragged {
 			// A plain click is a dismissal, not a one-character copy.
 			m.clearSelection()
@@ -242,7 +274,7 @@ func (m *Model) copySelection() bool {
 	}
 	writer := m.clipboard
 	if writer == nil {
-		writer = pbcopyClipboard
+		writer = systemClipboard
 	}
 	// A clipboard failure must not break the UI: the selection stays visible so
 	// the user can retry, and the error is surfaced in the transcript. Success
@@ -279,4 +311,61 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// Transcript points use rendered content rows, while other UI selections keep
+// screen coordinates. Header/footer rows never enter a transcript selection.
+func (m *Model) selectionViewportBounds() (int, int) {
+	top := lipgloss.Height(m.renderHeader())
+	return top, min(m.height-1, top+m.viewport.Height()-1)
+}
+
+func (m *Model) selectionPoint(p selPoint) selPoint {
+	p.col = clampInt(p.col, 0, max(0, m.width))
+	if m.selection.transcript {
+		top, bottom := m.selectionViewportBounds()
+		p.row = clampInt(p.row, top, max(top, bottom)) - top + m.viewport.YOffset()
+	}
+	return p
+}
+
+type selectionScrollMsg struct{ generation uint64 }
+
+func (m *Model) selectionScrollDirection() int {
+	if !m.selection.active || !m.selection.holding || !m.selection.transcript || !m.selection.dragged {
+		return 0
+	}
+	top, bottom := m.selectionViewportBounds()
+	if bottom <= top {
+		return 0
+	}
+	if m.selection.pointer.row <= top && !m.viewport.AtTop() {
+		return -1
+	}
+	if m.selection.pointer.row >= bottom && !m.viewport.AtBottom() {
+		return 1
+	}
+	return 0
+}
+
+func (m *Model) scheduleSelectionScroll() tea.Cmd {
+	if m.selectionScrollPending || m.selectionScrollDirection() == 0 {
+		return nil
+	}
+	m.selectionScrollPending = true
+	generation := m.selectionScrollGeneration
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg { return selectionScrollMsg{generation} })
+}
+
+func (m *Model) handleSelectionScroll(msg selectionScrollMsg) tea.Cmd {
+	if msg.generation != m.selectionScrollGeneration {
+		return nil
+	}
+	m.selectionScrollPending = false
+	direction := m.selectionScrollDirection()
+	if direction == 0 {
+		return nil
+	}
+	m.scrollLines(direction)
+	return m.scheduleSelectionScroll()
 }

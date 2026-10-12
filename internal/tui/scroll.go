@@ -7,8 +7,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// Scroll behavior is tuned per terminal. macOS terminals disagree on how they
-// deliver wheel input: some translate the wheel into cursor keys (xterm
+// Scroll behavior is tuned per terminal. Terminal emulators disagree on how
+// they deliver wheel input: some translate the wheel into cursor keys (xterm
 // alternate-scroll mode, ESC[?1007h), others report real mouse events once
 // tracking is on. Terminal.app additionally accelerates wheel reporting, so a
 // single physical notch can arrive as a burst of events.
@@ -42,12 +42,16 @@ type terminalProfile struct {
 func detectTerminalProfile() terminalProfile {
 	program := os.Getenv("TERM_PROGRAM")
 	term := os.Getenv("TERM")
+	windowsTerminal := os.Getenv("WT_SESSION") != ""
 
 	profile := terminalProfile{
 		name:            program,
 		mouseWheel:      true,
 		alternateScroll: true,
 		wheelLines:      wheelScrollLines,
+	}
+	if profile.name == "" && windowsTerminal {
+		profile.name = "Windows Terminal"
 	}
 	if profile.name == "" {
 		profile.name = term
@@ -78,9 +82,15 @@ func (m *Model) scrollLines(n int) {
 	}
 	if n > 0 {
 		m.viewport.ScrollDown(n)
-		return
+	} else {
+		m.viewport.ScrollUp(-n)
 	}
-	m.viewport.ScrollUp(-n)
+	if m.selection.active && m.selection.holding && m.selection.transcript {
+		m.selection.end = m.selectionPoint(m.selection.pointer)
+		if m.selection.end != m.selection.start {
+			m.selection.dragged = true
+		}
+	}
 }
 
 // handleMouse scrolls the transcript for wheel events and ignores every other
@@ -91,7 +101,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// selection handler is driven from the concrete events rather than from an
 	// action field.
 	if m.handleSelectionMouse(msg) {
-		return m, nil
+		return m, m.scheduleSelectionScroll()
 	}
 	switch msg.(type) {
 	case tea.MouseWheelMsg:

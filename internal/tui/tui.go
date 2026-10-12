@@ -163,7 +163,9 @@ type Model struct {
 	// within a run and resets when the list is cleared.
 	todosCollapsed bool
 	// selection is the current mouse text selection; see selection.go.
-	selection selection
+	selection                 selection
+	selectionScrollGeneration uint64
+	selectionScrollPending    bool
 	// permissionsCursor is the highlighted row in the /permissions picker.
 	permissionsCursor int
 	// providerMenu/modelMenu are snapshots taken when the matching picker
@@ -196,7 +198,7 @@ type Model struct {
 	// keys (kitty keyboard protocol). Shift+Enter only arrives as itself when
 	// it can; otherwise the fallback newline keys are the only option.
 	supportsShiftEnter bool
-	// clipboard receives copied text. Nil means pbcopy.
+	// clipboard receives copied text. Nil means the native system clipboard.
 	clipboard ClipboardWriter
 	// selectionHighlighted reports whether the last rendered frame actually
 	// painted a selection. Styling is stripped on non-TTY output, so escape
@@ -523,7 +525,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case selectionScrollMsg:
+		return m, m.handleSelectionScroll(msg)
 	case tea.WindowSizeMsg:
+		m.clearSelection()
 		// Never render into the terminal's final cell. Many terminals wrap as
 		// soon as that cell is written; one physical wrap can scroll the whole
 		// alternate screen and expose rows from the previous conversation.
