@@ -13,7 +13,7 @@ import (
 func TestBashToolRunsForegroundCommand(t *testing.T) {
 	tool := NewBashTool(BashOptions{WorkDir: t.TempDir()})
 
-	out, err := tool.Run(context.Background(), bashInput(`{"command":"printf hello"}`))
+	out, err := tool.Run(context.Background(), bashInput(testPrintCommand("hello"), false))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -34,7 +34,7 @@ func TestBashToolRejectsBannedCommand(t *testing.T) {
 		BannedCommands: []string{"git push"},
 	})
 
-	_, err := tool.Run(context.Background(), bashInput(`{"command":"git push origin main"}`))
+	_, err := tool.Run(context.Background(), bashInput("git push origin main", false))
 	if err == nil {
 		t.Fatal("expected banned command error")
 	}
@@ -43,7 +43,7 @@ func TestBashToolRejectsBannedCommand(t *testing.T) {
 func TestBashToolRejectsTrailingAmpersand(t *testing.T) {
 	tool := NewBashTool(BashOptions{WorkDir: t.TempDir()})
 
-	_, err := tool.Run(context.Background(), bashInput(`{"command":"sleep 10 &"}`))
+	_, err := tool.Run(context.Background(), bashInput("sleep 10 &", false))
 	if err == nil {
 		t.Fatal("expected trailing ampersand error")
 	}
@@ -52,7 +52,7 @@ func TestBashToolRejectsTrailingAmpersand(t *testing.T) {
 func TestBashToolRunsInBackground(t *testing.T) {
 	tool := NewBashTool(BashOptions{WorkDir: t.TempDir()})
 
-	out, err := tool.Run(context.Background(), bashInput(`{"command":"sleep 1; printf done","run_in_background":true}`))
+	out, err := tool.Run(context.Background(), bashInput(testSleepThenPrintCommand(1, "done"), true))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -73,7 +73,7 @@ func TestBashToolAutoBackgroundsLongCommand(t *testing.T) {
 		AutoBackgroundAfter: 20 * time.Millisecond,
 	})
 
-	out, err := tool.Run(context.Background(), bashInput(`{"command":"sleep 1; printf done"}`))
+	out, err := tool.Run(context.Background(), bashInput(testSleepThenPrintCommand(1, "done"), false))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -88,10 +88,14 @@ func TestBashToolAutoBackgroundsLongCommand(t *testing.T) {
 	job.Kill()
 }
 
-func bashInput(raw string) agent.ToolInput {
+func bashInput(command string, runInBackground bool) agent.ToolInput {
+	data, _ := json.Marshal(map[string]any{
+		"command":           command,
+		"run_in_background": runInBackground,
+	})
 	return agent.ToolInput{
 		CallID:    "call-1",
 		Name:      BashToolName,
-		Arguments: json.RawMessage(raw),
+		Arguments: data,
 	}
 }

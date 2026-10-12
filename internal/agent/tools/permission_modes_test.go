@@ -5,10 +5,33 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/wislist/mini-opencode/internal/agent"
 )
+
+func TestFullAccessAllowsAnotherWindowsVolume(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows volume semantics")
+	}
+
+	workDir := t.TempDir()
+	volume := "D:"
+	if filepath.VolumeName(workDir) == volume {
+		volume = "C:"
+	}
+	target := volume + `\outside\file.txt`
+	options := FileOptions{WorkDir: workDir, FullAccess: func() bool { return true }}
+
+	got, err := resolveWorkspacePathWithOptions(options, target)
+	if err != nil {
+		t.Fatalf("resolveWorkspacePathWithOptions() error = %v", err)
+	}
+	if got != filepath.Clean(target) {
+		t.Fatalf("got = %q, want %q", got, filepath.Clean(target))
+	}
+}
 
 func TestFilePermissionModeSwitch(t *testing.T) {
 	root := t.TempDir()

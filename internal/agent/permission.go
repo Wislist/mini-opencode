@@ -41,6 +41,10 @@ func NewDefaultPermissionPolicy(workDir string) DefaultPermissionPolicy {
 			"chown -R",
 			"git push",
 			"git reset --hard",
+			"format-volume",
+			"clear-disk",
+			"remove-partition",
+			"remove-item -recurse -force c:\\",
 		},
 	}
 }
@@ -162,12 +166,16 @@ func resolveSymlinks(path string) string {
 	// Walk up until we find an existing ancestor, resolve it, then re-append.
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	for dir != "/" && dir != "." {
+	for dir != "." {
 		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 			return filepath.Join(resolved, base)
 		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
 		base = filepath.Join(filepath.Base(dir), base)
-		dir = filepath.Dir(dir)
+		dir = parent
 	}
 	return filepath.Clean(path)
 }

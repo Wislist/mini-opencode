@@ -101,7 +101,14 @@ func resolveWorkspacePathRoots(workDir string, allowedRoots []string, path strin
 // working directory and allowed roots.
 func resolveWorkspacePathWithOptions(options FileOptions, path string) (string, error) {
 	if options.FullAccess != nil && options.FullAccess() {
-		return resolveWorkspacePathRoots(options.WorkDir, []string{"/"}, path)
+		if strings.TrimSpace(path) == "" {
+			return "", fmt.Errorf("path is required")
+		}
+		candidate := path
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(options.WorkDir, candidate)
+		}
+		return filepath.Abs(candidate)
 	}
 	return resolveWorkspacePathRoots(options.WorkDir, options.AllowedRoots, path)
 }

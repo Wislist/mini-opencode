@@ -1,13 +1,12 @@
 Execute shell commands; long-running commands automatically move to background and return a shell ID.
 
 <environment>
-Runs on macOS via `bash -lc` using the system shell. The BSD coreutils and
-standard POSIX toolset are available. Use forward slashes for paths.
+{{ .ShellEnvironment }}
 </environment>
 
 <execution_steps>
 1. Directory Verification: If creating directories/files, use LS tool to verify parent exists
-2. Security Check: In ask/auto-review mode, banned commands ({{ .BannedCommands }}) return errors. Ask mode requests user approval for shell execution; auto-review only skips approval for exact commands `pwd`, `/bin/pwd`, `/bin/ls`. Full-access skips tool approval and these legacy bans, but safety/plan hooks still apply. Never try to bypass a denial.
+2. Security Check: In ask/auto-review mode, banned commands ({{ .BannedCommands }}) return errors. Ask mode requests user approval for shell execution; auto-review only skips approval for a small exact allowlist of read-only location/listing commands. Full-access skips tool approval and these legacy bans, but safety/plan hooks still apply. Never try to bypass a denial.
 3. Command Execution: Execute with proper quoting, capture output
 4. Auto-Background: Commands exceeding 1 minute (default, configurable via `auto_background_after`) automatically move to background and return shell ID
 5. Output Processing: Truncate if exceeds {{ .MaxOutputLength }} characters
@@ -17,7 +16,13 @@ standard POSIX toolset are available. Use forward slashes for paths.
 <usage_notes>
 - Command required, working_dir optional (defaults to current directory)
 - IMPORTANT: Use Grep/Glob/Agent tools instead of 'find'/'grep'. Use Read/LS tools instead of 'cat'/'head'/'tail'/'ls'
+{{- if .Windows }}
+- This host uses {{ .ShellName }}. Write PowerShell, not POSIX shell or cmd.exe syntax.
+- Chain independent commands with `;`. Windows PowerShell 5.1 does not support `&&`; inspect `$LASTEXITCODE` when a native command must succeed before continuing.
+- Quote paths containing spaces. Prefer the working_dir argument over `Set-Location`.
+{{- else }}
 - Chain with ';' or '&&', avoid newlines except in quoted strings
+{{- end }}
 - Each command runs in independent shell (no state persistence between calls)
 - Prefer absolute paths over 'cd' (use 'cd' only if user explicitly requests)
 {{- if .RgAvailable }}
@@ -63,6 +68,11 @@ Commit messages are for future readers scanning history. Before committing:
 </commit_messages>
 
 <examples>
+{{- if .Windows }}
+Good: pytest C:\work\project\tests
+Bad: Set-Location C:\work\project; pytest tests
+{{- else }}
 Good: pytest /foo/bar/tests
 Bad: cd /foo/bar && pytest tests
+{{- end }}
 </examples>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -119,12 +120,24 @@ func locallyReviewable(call ToolCall, args map[string]json.RawMessage) bool {
 		if json.Unmarshal(args["command"], &command) != nil {
 			return false
 		}
-		// Exact commands only: no flags, expansions, pipelines, redirects,
-		// project scripts or git commands (which may execute configured hooks).
-		switch command {
-		case "pwd", "/bin/pwd", "/bin/ls":
+		return locallyReviewableShellCommandForOS(command, runtime.GOOS)
+	}
+	return false
+}
+
+func locallyReviewableShellCommandForOS(command string, goos string) bool {
+	// Exact commands only: no flags, expansions, pipelines, redirects,
+	// project scripts or git commands (which may execute configured hooks).
+	if goos == "windows" {
+		switch strings.ToLower(strings.TrimSpace(command)) {
+		case "get-location", "pwd", "get-childitem", "dir":
 			return true
 		}
+		return false
+	}
+	switch command {
+	case "pwd", "/bin/pwd", "/bin/ls":
+		return true
 	}
 	return false
 }

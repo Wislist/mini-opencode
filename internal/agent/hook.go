@@ -111,6 +111,9 @@ func NewSafetyHook(workDir string) *SafetyHook {
 			"dd if=/dev/zero",
 			"dd if=/dev/urandom",
 			"chmod -R 000",
+			"format-volume",
+			"clear-disk",
+			"remove-partition",
 		},
 		DenyPatterns: []string{
 			"drop database",
@@ -129,6 +132,10 @@ func NewSafetyHook(workDir string) *SafetyHook {
 			"rm -rf $pwd",
 			"rm -rf ~",
 			"shred -u",
+			"remove-item -recurse -force .git",
+			"remove-item -recurse -force $pwd",
+			"remove-item -recurse -force c:\\",
+			"rd /s /q .git",
 		},
 	}
 }
