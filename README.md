@@ -1,96 +1,24 @@
 # mini-opencode
 
-一个从零开始实现的 Go 版 agent 终端项目。
+<p align="center">
+  <img src="assets/readme/hero.svg" alt="mini-opencode：从提示、运行时、权限门控与工具执行，到本地持久化状态的 coding agent 工作流" width="100%">
+</p>
 
-本项目不依赖仓库里已有的 `02-llmg`、`03-mini-opencode` 或其它历史实现。
+<p align="center">
+  Go 实现的本地 coding agent 终端：Bubble Tea TUI、流式 agent runtime、受控工具执行、持久会话与可扩展 provider。
+</p>
 
-> 正式支持 macOS 与 Windows 10/11（推荐 Windows Terminal + PowerShell 7）。命令工具在
-> macOS 使用 `bash -lc`，在 Windows 优先使用 `pwsh.exe`，并回退到系统 `powershell.exe`。
+<p align="center">
+  macOS · Windows 10/11 · Go 1.25 · MIT
+</p>
 
-## 目标
+`mini-opencode` 同时提供交互式 TUI 和行模式 CLI。终端输入时进入 TUI；stdin 来自管道时使用同一套 runtime 执行行模式任务。项目独立实现，不依赖仓库中的历史 agent 实现。
 
-实现一个接近 `crush` 一半能力的本地 agent 终端：
+## 快速开始
 
-1. Bubble Tea TUI
-2. Agent runtime event stream
-3. 权限与工具执行体验
-4. 上下文工程（超过阈值自动压缩 + 真实 token 计数）
-5. 多 provider 配置
-6. MCP lifecycle
-7. Git diff 与测试反馈
+### npm / pnpm
 
-## 当前阶段
-
-配置分成两层：provider、模型、上下文窗口与 API key 只保存在全局
-`~/.mini-opencode/config.json`；普通项目设置可由 `<project>/.mini-opencode/config.json`
-覆盖。项目配置中的 `provider` / `providers` / `active_provider` 会被忽略，旧的项目根
-`config.json` 与 `secrets.json` 不再读取或写入。
-
-- 独立 `go.mod` 与入口 `cmd/mini-opencode`
-- 标准库 CLI 壳（非终端 stdin）与 Bubble Tea TUI（终端）
-- `internal/agent` runtime：turn loop、event stream、hook 链、usage 累计
-- provider 抽象：`echo` 与 OpenAI 兼容（SSE 流式、usage、retry/backoff、可配置 timeout）
-- 工具集：bash/read/write/edit/ls/glob/grep/job_output/job_kill/todo_write/todo_blocked/exit_plan_mode/task/web_fetch/web_search/install_skill/memory
-- 文件观察：read-before-write + 改动前快照 + `/undo`
-- 并发：只读工具同一批次并发执行，写操作串行；runtime 状态加锁，`go test -race ./...` 通过
-- 权限：完全信任 / 替我审核 / 请求批准三种模式、会话级 always-allow、写操作 diff 预览
-- 多 provider：`providers` 目录（自定义名称/端点/模型列表/密钥，第三方中转开箱可用）、
-  `/provider` 与 `/model` 浮层切换（仅本次进程生效）、切换时通过 `AdoptStateFrom` 保住对话；
-  配置统一保存为 `providers` + `active_provider`，旧单项格式仅保留读取迁移
-- 新增供应商流程（TUI）：`/provider add` 三框表单（名称/地址/密钥，密钥遮罩）→ 向该地址请求
-  `/models` **主动拉取全部模型**（含厂商上报的上下文窗口，自动写进 `context_window`）
-  → 多选勾选（默认全选）→ 写入全局 `~/.mini-opencode/config.json` 并立即切换；
-  校验或拉取失败退回表单且保留已填内容，任何一步 `esc` 都不会落盘。`/model refresh`
-  对当前 provider 做同样的拉取（列表为已配置 ∪ 拉回的并集）
-- Plan 模式闭环：只读约束 + `exit_plan_mode` 提交 + 审批后继续实现
-- todo 执行链：列表未完成的项由 runtime 自动续跑，阻塞由 agent 通过 `todo_blocked` 自行判定
-- todo 面板：只在有未完成项时显示（完成后自动消失），`ctrl+t` 手动显隐，窄/矮终端下自动收缩不溢出
-- run 级重试：整轮 provider 失败自动重试，transcript 不丢、工具不重复执行
-- 上下文窗口：三级来源（显式 `context_window` → 内置模型表 → 占位猜测 8192），**猜测值在
-  header / `/status` / `/provider` 里标成「估值」**，可在 `/model` 菜单按 `c` 设置，或直接执行 `/model context 1M` 保存并立即生效；也可 `/model refresh`
-  从 `/models` 自动读
-- 上下文压缩：按剩余余量触发（crush 式阈值）；**非破坏性**——摘要追加并标记，原文保留在
-  内存与 SQLite，只在发给 provider 时截断；压缩时把 todo 列表并入总结指令
-- 会话检索：FTS5 全文索引 `messages`，触发器随写同步，可搜索历史会话
-- 跨会话记忆：`.mini-opencode/memory/*.md`（人类可读可编辑），`memory` 工具主动写入 +
-  run 结束后台自动提炼；默认词面召回，可选 OpenAI-compatible embedding + RRF 混合检索，
-  失败自动降级，索引只是可重建缓存；只注入前 3 条，`/memory` 查看
-- MCP：`stdio` + `http`（streamable HTTP，含 `Mcp-Session-Id`）+ `sse`（legacy HTTP+SSE）
-  三种传输，`headers`/`token`/`token_env` 鉴权，工具以 `<server>__<tool>` 注册、`/mcp` 查看状态
-- 会话：SQLite 持久化、message parts、归档、todos、token 统计、`parent_session_id` 分支（`/fork`）
-- Prompt：coder/summary/initialize/title/task/agentic_fetch 模板全部接入
-- Skills：curated/local/GitHub 安装，注入 `<available_skills>`
-
-## 目录
-
-```text
-cmd/mini-opencode     CLI 入口
-internal/app          CLI 壳、TUI 启动、运行时装配
-internal/agent        agent 核心工作流（runtime/provider/hook/permission）
-internal/agent/prompt Prompt 组装与模板
-internal/agent/tools  工具实现与指令模板
-internal/mcp          MCP stdio client、manager 与工具适配
-internal/session      SQLite 会话存储（messages/files/read_files/todos + FTS5 全文检索）
-internal/memory       跨会话记忆（Markdown 笔记、自动提炼、按需召回）
-internal/skills       Skill 存取与安装（curated/local/GitHub）
-internal/tui          Bubble Tea 界面
-internal/diffutil     权限提示用的行级 diff
-internal/config       全局 ~/.mini-opencode/config.json + 项目 .mini-opencode/config.json
-docs/commands.md      斜杠命令与权限交互
-docs/mcp.md           MCP 接入说明
-docs/prompt.md        Prompt 组装说明
-docs/tools.md         Tools 说明
-docs/providers.md     Provider 配置说明
-docs/skills.md        Skills 说明
-docs/hooks.md         Hooks（危险行为拦截 / 循环检测 / plan 模式）说明
-docs/memory.md        跨会话记忆（文件格式、自动提炼、召回策略）
-```
-
-## 运行
-
-### 从 npm / pnpm 安装
-
-npm 与 pnpm 使用同一个 npm Registry，不需要分别发布两次。安装公开包：
+需要 Node.js 18 或更高版本。Node 只负责启动，实际运行的是当前平台的 Go 原生二进制。
 
 ```bash
 npm install --global @wislist/mini-opencode
@@ -100,210 +28,217 @@ pnpm add --global @wislist/mini-opencode
 mini-opencode
 ```
 
-安装包会根据当前系统只下载对应的原生二进制。目前发布 macOS 与 Windows 10/11 的
-arm64、x64 版本；安装时不要关闭 optional dependencies。Node.js 仅作为轻量启动器，
-最终运行的是 Go 编译出的 `mini-opencode`。
-
-无作用域的 `mini-opencode` 包名已被占用，因此本项目使用
-`@wislist/mini-opencode`；全局命令仍叫 `mini-opencode`。
+安装时请保留 optional dependencies。当前原生包覆盖 macOS 与 Windows 10/11 的 arm64、x64。
 
 ### 从源码运行
 
 macOS：
 
 ```bash
-make run          # 带 git 版本号跑 TUI
-make build        # 构建到 bin/mini-opencode
-make check        # fmt-check + vet + test
-make help         # 全部目标
-
-go run ./cmd/mini-opencode   # 也可以直接跑，版本号用源码兜底值
+make run
 ```
 
 Windows PowerShell：
 
 ```powershell
 go run ./cmd/mini-opencode
-./scripts/build.ps1           # 构建到 bin/mini-opencode.exe，并注入 git 版本号
-go test ./...
+# 或构建带 Git 版本号的可执行文件
+./scripts/build.ps1
 ```
 
-Windows 下推荐使用 Windows Terminal 与 PowerShell 7；未安装 `pwsh.exe` 时会自动使用
-Windows PowerShell 5.1。PowerShell 5.1 不支持 `&&`，工具提示会要求使用 `;` 和
-`$LASTEXITCODE`。项目不通过 `cmd.exe` 二次包装命令。
+没有配置文件时使用内置 `echo` provider，可以先进入界面查看交互。接入模型时，在 TUI 输入 `/provider add`，依次填写名称、OpenAI-compatible 地址和密钥；程序会拉取 `/models`，确认模型后才写入全局配置。
 
-## 版本号
+## 工作方式
 
-`make build`（macOS）和 `scripts/build.ps1`（Windows）都用 git 信息自动注入版本号，
-不需要手动维护：
-
-| 状态 | 报告的版本 |
+| 阶段 | 运行内容 |
 | --- | --- |
-| 正好在 tag 上 | `0.5.0` |
-| tag 后有 N 个提交 | `0.5.0-dev.N.g<sha>` |
-| 没有任何 tag | `0.5.0-dev.g<sha>` |
-| 工作区有未提交改动 | 追加 `-dirty` |
+| 1. 上下文 | 组装 coder prompt、工具 schema、`AGENTS.md`、skills 与按需召回的 memory。 |
+| 2. Runtime | 流式获取回复；遇到 tool call 就执行并继续 turn loop，直到任务结束或命中上限。 |
+| 3. 守卫与工具 | Hook 先判定，permission policy 再审批；只读调用可批量并发，写操作串行。 |
+| 4. 本地状态 | SQLite 保存消息、文件快照、todo、token 与 FTS5 索引；Markdown 保存跨会话记忆。 |
 
-基线版本只在 `internal/app/app.go` 定义一处，两套构建脚本都从那里读取，所以
-**改版本号只需要改那一行**。发版代码先进入 `main`，再由 `main` 合并到 `release`，最后
-只在 `release` 最新提交上创建 tag。
+## 核心能力
 
-### 发布 npm 版本
+### Agent loop
 
-GitHub Actions 在推送 `v<版本>` tag 时构建并发布以下公开包：
+- SSE 流式响应、usage 累计、provider 级 retry/backoff 与 run 级重试。
+- `SafetyHook`、`LoopGuardHook`、`PlanModeHook` 同时覆盖 CLI 与 TUI。
+- TUI 用 `tab` 切换 plan 模式；计划批准后继续复用当前对话状态。
+- todo 是执行链的一部分：未完成时 runtime 自动续跑；阻塞时由 agent 显式说明原因。
 
-- `@wislist/mini-opencode`
-- `@wislist/mini-opencode-darwin-arm64`
-- `@wislist/mini-opencode-darwin-x64`
-- `@wislist/mini-opencode-win32-arm64`
-- `@wislist/mini-opencode-win32-x64`
+### 工作区保护
 
-发布前需要确认 npm 账号或组织拥有 `@wislist` 作用域。由于 npm 只允许为已经存在的包配置
-Trusted Publisher，第一次发布需要在名为 `npm` 的 GitHub Environment 中临时添加 granular
-access token secret：`NPM_TOKEN`。创建 token 时给 `@wislist` scope 设置
-`Read and write (publish and stage)`，开启 `Bypass 2FA`，并设置尽可能短的有效期；不要把
-token 写进仓库文件。这个 token 只用于创建上述五个包，首发完成后立即删除。
+- 默认只允许内置文件工具访问启动目录及 `workspace.allowed_roots`。
+- 已存在文件默认必须先 `read` 才能 `write` / `edit`。
+- 修改前保存会话级快照，`/undo` 恢复最近一次文件变更。
+- `write` / `edit` 审批展示 diff；权限模式切换不会清空对话。
 
-首发完成后，在 npm 的每个包设置中分别配置 GitHub Actions Trusted Publisher：
+### 上下文与记忆
+
+- 上下文窗口来源依次为显式配置、内置模型表、标明“估值”的保守 8192 占位值。
+- 自动压缩按剩余空间触发：大于 200k 的窗口保留 20k，其余默认保留 20%；显式 `agent.compact_threshold` 继续使用旧的已用比例语义。
+- 压缩非破坏性：原消息保留在内存与 SQLite，仅发送给 provider 的视图从摘要标记处截断。
+- `.mini-opencode/memory/*.md` 是可读写的长期记忆；支持主动记录、后台提炼、词面召回和可选 embedding + RRF。
+
+### Provider 与扩展
+
+- 内置 `echo`，支持多个 OpenAI-compatible provider、自定义名称、端点、模型目录与上下文窗口。
+- 会话中切换 provider 或 model 会保留对话；切换只影响当前进程，新增、刷新和窗口设置写入全局配置。
+- MCP 支持 `stdio`、streamable HTTP 与 legacy SSE，工具名以 `<server>__<tool>` 注册。
+- 内置文件、shell、todo、只读子 agent、Web、skill 安装与 memory 工具。
+
+## 常用交互
+
+### 命令
+
+| 命令 | 用途 |
+| --- | --- |
+| `/status` | 查看 workspace、分支、权限、provider、session、上下文与 token。 |
+| `/permissions` | 在 TUI 打开权限菜单；带参数时直接切换模式。 |
+| `/provider` / `/model` | 打开目录菜单或带参数切换；对话状态保持不变。 |
+| `/mcp` | 查看每个 MCP server 的连接状态与工具数。 |
+| `/session` / `/newsession` / `/fork` | 切换、新建或分支会话。 |
+| `/undo` / `/compact` / `/memory` | 恢复文件、手动压缩上下文、查询长期记忆。 |
+| `/init` | 分析当前项目并创建或刷新 `AGENTS.md`。 |
+
+输入 `/` 会打开补全菜单。完整命令与参数见 [docs/commands.md](docs/commands.md)。
+
+### TUI 按键
+
+| 按键 | 行为 |
+| --- | --- |
+| `enter` | 发送消息。 |
+| `shift+enter` / `ctrl+j` / `alt+enter` | 在多行输入框中换行。 |
+| `tab` | 切换 plan 模式，或接受当前补全项。 |
+| `ctrl+t` | 折叠或展开 todo 摘要；新一轮用户消息开始时清空上一轮 todo。 |
+| `esc` | 中断运行、拒绝审批或关闭当前浮层。 |
+| `ctrl+c` | 空闲时退出，运行中中断。 |
+| 鼠标拖拽 | 按屏幕实际渲染结果选择并复制文本。 |
+
+## 配置
+
+配置分两层：
 
 ```text
-Organization or user: Wislist
-Repository:           mini-opencode
-Workflow filename:    npm-release.yml
-Environment name:     npm
-Allowed actions:      npm publish
+~/.mini-opencode/config.json             全局 provider、模型、窗口与 API key
+<project>/.mini-opencode/config.json     workspace、memory、MCP 等项目设置
 ```
 
-五个包都配置完成后删除 GitHub Environment 中的 `NPM_TOKEN`。后续 workflow 使用 OIDC
-短期凭据发布并生成 provenance，不再保存长期写 token。Trusted Publisher 新建后应在两天内
-完成第一次成功发布，否则 npm 会让该配置过期，需要删除后重建。
+项目配置中的 `provider`、`providers`、`active_provider` 会被忽略，避免项目仓库覆盖全局密钥和模型目录。
 
-完成首发认证配置后执行：
+### Provider
 
-```bash
-# 在 main 上修改 internal/app/app.go 的基线版本并提交
-make check
-git push origin main
+推荐用环境变量保存密钥：
 
-# release 只接收 main；没有 release 专属提交时保持快进历史
-git switch release
-git merge --ff-only main
-git push origin release
-
-# 当前仓库已存在 v0.5.0，下一版必须使用新的版本号，例如 v0.5.1
-make tag
-git push origin v0.5.1
+```json
+{
+  "providers": [
+    {
+      "name": "relay",
+      "base_url": "https://relay.example.com/v1",
+      "api_key_env": "RELAY_API_KEY",
+      "models": ["your-model"],
+      "model": "your-model"
+    }
+  ],
+  "active_provider": "relay"
+}
 ```
 
-tag 指向的提交必须在远端 `release` 历史中，并且版本必须与 `internal/app/app.go` 完全一致，
-否则发布任务会拒绝执行。`.github/workflows/release-guard.yml` 会拒绝非 `main → release` 的
-PR；还需要在 GitHub Ruleset 中要求 `release` 必须通过 PR 更新、禁止直接 push，并把
-`Only main can update release` 设为 required check。平台包会先发布，最后发布主包装包，
-避免用户安装到依赖尚未就绪的版本。流水线会跳过已经存在的同版本包，因此平台包发布到
-一半后也可以重新运行对应 workflow。
-
-
-## Workspace 访问范围
+密钥解析优先级为 `api_key` → `api_key_env`。未知模型的窗口会显示为估值；优先使用 `/model refresh` 接收厂商上报值，或用 `/model context 128K` 显式设置。
 
 ### 权限模式
 
-CLI 与 TUI 都支持 `/permissions` 查看选项，TUI 顶栏（宽度允许时）和 `/status` 显示当前模式：
+| 模式 | 行为 |
+| --- | --- |
+| `ask` | 默认；危险或需确认的调用交给用户审批。 |
+| `auto-review` | 只自动批准保守的本地文件写入和精确只读目录命令；不是模型审核器。 |
+| `full-access` | 需显式确认；跳过逐次审批与工作区路径限制，但仍受 hooks、plan 模式、先读后写和当前系统账户权限约束。 |
 
-| 命令 | 模式 | 行为 |
-| --- | --- | --- |
-| `/permissions ask` | 请求批准（默认） | 保留现有 deny/confirm 策略；危险工具弹出人工审批。 |
-| `/permissions auto-review` | 替我审核 | 保守本地规则自动批准范围内的 `write`/`edit`，及平台对应的精确只读目录命令：macOS 为 `pwd`、`/bin/pwd`、`/bin/ls`，Windows 为 `Get-Location`、`pwd`、`Get-ChildItem`、`dir`；其他需审批工具仍交给用户。不是模型审核器。 |
-| `/permissions full-access confirm` | 完全信任 | 解除主 agent 文件工具的工作区限制、跳过逐次审批及旧命令黑名单；仍受安全 Hook、plan 模式、先读后写与系统账户权限约束。 |
+这些是应用层审批机制，**不是操作系统沙箱**。Shell 与外部 MCP server 仍以当前账户权限运行。
 
-只输入 `/permissions full-access` 会显示风险提示，不会启用。模式切换仅对本次进程有效，
-清除已有工具 always-allow 授权，不清空对话；不允许在前台 run 中切换，也不会终止已启动的后台进程。
-保存设置（如 `/provider add`）不会意外持久化临时权限模式。启动默认值可显式写入配置：
-
-```json
-{ "permissions": { "mode": "ask" } }
-```
-
-未知模式会报错，未配置时使用 `ask`。显式配置 `full-access` 表示已同意在启动时启用，不再二次提示。
-
-**这些是应用层审批机制，不是操作系统沙箱。** 平台 Shell 会以当前账户权限运行；
-命令字符串里的路径和网络行为没有系统级隔离。Web 工具沿用只读免审批行为，MCP 依据其工具行为声明审批；
-只读 `task` 子 agent 仍限制在原工作区与 allowed roots 内。不要将模式名称理解为与 Codex 安全能力完全等价。
-
-### 配置文件工具的允许目录
-
-默认情况下内置文件工具只能读写启动时所在的工作目录（完全访问模式除外）。如果从子目录启动又需要访问整个项目，可以在项目配置 `<project>/.mini-opencode/config.json` 里配置 `workspace.allowed_roots`：
+### 项目范围
 
 ```json
 {
   "workspace": {
-    "allowed_roots": ["/Users/wislist/Desktop/worksplace/LLM-Learn"]
+    "allowed_roots": ["../shared-package"],
+    "require_read_before_write": true
   }
 }
 ```
 
-Windows 路径在 JSON 中需要转义反斜杠，例如
-`"allowed_roots": ["D:\\work\\LLM-Learn"]`。
-
-`allowed_roots` 中的路径（绝对路径或相对当前工作目录）会被规范化为绝对路径并去重，agent 在权限校验和文件工具中都会把这些目录视为可访问范围（该列表属于项目配置，不会改写全局 provider 目录）。
-
-同一节点还控制改文件前的观察策略：
-
-```json
-{
-  "workspace": { "require_read_before_write": true }
-}
-```
-
-默认 `true`：`write`/`edit` 不能覆盖本会话未 `read` 过的已存在文件，且改动前会把旧内容存进会话快照，`/undo` 可回滚最后一次改动。
-
-## 上下文预算
-
-对话接近 `providers[].context_window` 时 runtime 会自动压缩（默认阈值 0.85），打印 `context auto-compacted` 后继续跑；单次 run 的 turn 预算由 `agent.max_turns` 控制（默认 100），打满时给出可操作的提示而不是静默失败。
-
-```json
-{
-  "providers": [{ "name": "deepseek", "model": "deepseek-chat", "api_key_env": "DEEPSEEK_API_KEY", "context_window": 128000 }],
-  "active_provider": "deepseek",
-  "agent": { "max_turns": 200, "compact_threshold": 0.85 }
-}
-```
-
-## MCP
+### MCP
 
 ```json
 {
   "mcpServers": {
-    "go": { "enabled": true, "command": "gopls", "args": ["mcp"] }
+    "go": {
+      "enabled": true,
+      "command": "gopls",
+      "args": ["mcp"]
+    }
   }
 }
 ```
 
-`enabled: true` 的 server 会在启动时拉起并注册其工具；单个 server 失败只打印告警，不阻塞启动。用 `/mcp` 查看每个 server 的状态与工具数。
+单个 server 启动失败只记录警告，不阻塞主程序。远程传输、鉴权与会话细节见 [docs/mcp.md](docs/mcp.md)。Web 搜索端点的配置见 [docs/tools.md](docs/tools.md#web-tools)。
 
-## Web
+## 平台行为
 
-`web_fetch` 开箱可用；`web_search` 需要配置搜索端点（例如本地 SearXNG）：
+- macOS 的 `bash` 工具通过系统 `bash -lc` 执行。
+- Windows 优先使用 `pwsh.exe`，回退到 `powershell.exe`，不经过 `cmd.exe`。
+- 推荐 Windows Terminal + PowerShell 7；PowerShell 5.1 命令不能依赖 `&&`。
+- 会话数据库位于 `<workDir>/.mini-opencode/sessions.db`，JSON 归档位于 `.mini-opencode/sessions/`。
 
-```json
-{
-  "web": { "search_url": "http://localhost:8888/search?format=json&q={query}" }
-}
+## 项目结构
+
+```text
+cmd/mini-opencode       CLI / TUI 入口
+internal/app            启动装配与前端适配
+internal/agent          runtime、事件、hooks、provider、permission
+internal/agent/tools    内置工具与工具指令
+internal/tui            Bubble Tea 界面
+internal/session        SQLite 会话、快照、todos、FTS5
+internal/memory         Markdown 记忆、提炼与召回
+internal/mcp            MCP client、manager 与工具适配
+internal/config         全局 / 项目配置加载与持久化
+npm/                    Node 启动器与平台包
 ```
 
-未配置端点时 `web_search` 不会注册，避免无谓的重试。抓取到的网页内容会被标记为不可信数据。
+## 文档
 
-## Skills
+| 主题 | 文档 |
+| --- | --- |
+| Provider、模型、密钥与上下文窗口 | [docs/providers.md](docs/providers.md) |
+| 命令、按键、权限与上下文预算 | [docs/commands.md](docs/commands.md) |
+| 内置工具、Web 与文件观察 | [docs/tools.md](docs/tools.md) |
+| MCP 传输与鉴权 | [docs/mcp.md](docs/mcp.md) |
+| Hooks 与 plan 模式 | [docs/hooks.md](docs/hooks.md) |
+| Prompt 组装 | [docs/prompt.md](docs/prompt.md) |
+| 跨会话记忆 | [docs/memory.md](docs/memory.md) |
+| Skills 安装与加载 | [docs/skills.md](docs/skills.md) |
 
-Agent 可通过 `install_skill` 工具自行安装 skill（`SKILL.md`），来源包括内置 curated 列表、本地路径、GitHub 仓库。安装后 skill 会出现在系统 prompt 的 `<available_skills>` 中（CLI 与 TUI 都会注入）；CLI 中用 `/skills` 查看已安装与可安装的 skill。
+## 开发
 
-## Hooks
+```bash
+make build       # 构建 bin/，版本号来自 Git
+make check       # fmt-check + vet + Go tests + npm wrapper tests
+make race        # 并发相关改动使用 race detector
+make help        # 查看全部目标
+```
 
-Runtime 内置三个 hook：
+普通 `go build ./...` 也可用，版本号回退到 `internal/app/app.go` 的基线值。`.gocache/` 是仓库内的本地构建缓存，不属于源码。
 
-- `SafetyHook`：拦截删库、`drop database`、`git push --force`、`git clean -fdx`、`rm -rf .git` 等破坏性命令，并禁止写入工作区根目录或 `.git`；遇到 `rm -rf /`、`mkfs` 等灾难性命令直接中止运行。
-- `LoopGuardHook`：检测 agent 重复调用同一工具或整轮回复重复，达到阈值（默认 3 次）即中止运行，避免重复思考造成的 token 浪费。
-- `PlanModeHook`：plan 模式下只放行只读工具（以及 `exit_plan_mode`、`todo_write`）。
+<details>
+<summary><strong>版本号与发布约束</strong></summary>
 
-两条入口（CLI/TUI）都会注册全部三个 hook。
+`make build` 和 `scripts/build.ps1` 从 Git 推导版本并通过 ldflags 注入：tag 上显示基线版本，tag 后提交显示 `-dev.N.g&lt;sha&gt;`，脏工作区追加 `-dirty`。基线版本的唯一来源是 `internal/app/app.go`。
 
-详见 [docs/hooks.md](docs/hooks.md)，命令与权限交互见 [docs/commands.md](docs/commands.md)。
+发版顺序是：在 `main` 更新基线版本并运行 `make check`，将 `main` 合并到 `release`，再在干净的 `release` 最新提交执行 `make tag`。tag 必须位于远端 `release` 历史中，且版本与源码基线一致；`v*` tag 触发 `.github/workflows/npm-release.yml` 发布主包和四个平台包。
+
+</details>
+
+## License
+
+[MIT](LICENSE)
