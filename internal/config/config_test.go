@@ -15,6 +15,23 @@ func TestLoadMissingConfigUsesEchoDefault(t *testing.T) {
 	if cfg.Provider.Name != "echo" {
 		t.Fatalf("provider = %q", cfg.Provider.Name)
 	}
+	if cfg.ProviderConfigured {
+		t.Fatal("missing config must keep echo as an internal fallback, not mark it as user-configured")
+	}
+}
+
+func TestLoadExplicitEchoCountsAsConfigured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"echo","type":"echo"}],"active_provider":"echo"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.ProviderConfigured {
+		t.Fatal("an explicitly configured echo provider must not be presented as first-run setup")
+	}
 }
 
 func TestLoadAppliesDisplayNameDefaults(t *testing.T) {

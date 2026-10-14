@@ -115,6 +115,9 @@ func TestLoadWorkspaceIgnoresProjectProviderWithoutGlobalCatalog(t *testing.T) {
 	if cfg.Provider.Name != ProviderTypeEcho || cfg.Provider.APIKey != "" {
 		t.Fatalf("project provider became active without a global catalog: %+v", cfg.Provider)
 	}
+	if cfg.ProviderConfigured {
+		t.Fatal("a project-local provider must not make the global LLM setup look configured")
+	}
 	if cfg.Memory.TopK != 8 {
 		t.Fatalf("ordinary project settings were not merged: %+v", cfg.Memory)
 	}

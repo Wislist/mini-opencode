@@ -31,6 +31,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleProviderMenuKey(msg)
 	case stateModelMenu:
 		return m.handleModelMenuKey(msg)
+	case stateProviderSetup:
+		return m.handleProviderSetupKey(msg)
 	case stateProviderForm:
 		return m.handleProviderFormKey(msg)
 	case stateModelSelect:
@@ -104,6 +106,9 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		input := strings.TrimSpace(m.input.Value())
 		if input == "" {
+			if m.llmStatus != LLMReady {
+				m.openProviderRecoveryForm()
+			}
 			return m, nil
 		}
 		m.input.Reset()

@@ -112,6 +112,35 @@ func typeIntoForm(t *testing.T, m *Model, name, url, apiKey string) *Model {
 	return m
 }
 
+// Bubble Tea v2 delivers terminal paste as tea.PasteMsg rather than KeyMsg.
+// The provider overlay must forward those messages to whichever field owns
+// focus; API keys are normally pasted rather than typed character by character.
+func TestProviderFormAcceptsPasteInEveryField(t *testing.T) {
+	m := openProviderForm(t, providerTestModel(t))
+
+	model, _ := m.Update(tea.PasteMsg{Content: "deepseek"})
+	m = model.(*Model)
+	m = pressKey(m, key("tab"))
+	model, _ = m.Update(tea.PasteMsg{Content: "https://api.deepseek.com"})
+	m = model.(*Model)
+	m = pressKey(m, key("tab"))
+	model, _ = m.Update(tea.PasteMsg{Content: "sk-secret-value"})
+	m = model.(*Model)
+
+	if got := m.providerForm.name.Value(); got != "deepseek" {
+		t.Fatalf("pasted provider name = %q", got)
+	}
+	if got := m.providerForm.url.Value(); got != "https://api.deepseek.com" {
+		t.Fatalf("pasted provider url = %q", got)
+	}
+	if got := m.providerForm.key.Value(); got != "sk-secret-value" {
+		t.Fatalf("pasted api key = %q", got)
+	}
+	if rendered := plainText(m.renderProviderForm()); strings.Contains(rendered, "sk-secret-value") {
+		t.Fatalf("pasted api key leaked into rendered form:\n%s", rendered)
+	}
+}
+
 // 表单完成后必须回到「三项都填好」的状态，而不是留下一半的配置。
 func TestProviderFormSubmitFetchesFromTheEnteredEndpoint(t *testing.T) {
 	m := providerTestModel(t)
@@ -296,7 +325,7 @@ func TestModelSelectRejectsEmptySelection(t *testing.T) {
 	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
 		t.Fatalf("global config written despite an empty selection: %v", err)
 	}
-	if !strings.Contains(plainText(m.renderModelSelect()), "至少") {
+	if !strings.Contains(plainText(m.renderModelSelect()), "Select at least one model") {
 		t.Fatalf("no explanation shown:\n%s", plainText(m.renderModelSelect()))
 	}
 }
@@ -493,7 +522,7 @@ func TestProviderFormEmptyModelListSaves(t *testing.T) {
 	if len(cfg.Provider.CatalogModels()) != 0 {
 		t.Fatalf("models = %v, want none", cfg.Provider.CatalogModels())
 	}
-	if joined := strings.Join(m.blocks, "\n"); !strings.Contains(joined, "模型") {
+	if joined := strings.Join(m.blocks, "\n"); !strings.Contains(joined, "returned no models") {
 		t.Fatalf("no explanation of the empty model list: %q", joined)
 	}
 }
@@ -660,7 +689,7 @@ func TestProviderMenuAddRowOpensTheForm(t *testing.T) {
 	if !last.add {
 		t.Fatalf("last menu row is not the add row: %+v", last)
 	}
-	if !strings.Contains(plainText(m.renderProviderMenu()), "新增") {
+	if !strings.Contains(plainText(m.renderProviderMenu()), "+ Add provider") {
 		t.Fatalf("add row not rendered:\n%s", plainText(m.renderProviderMenu()))
 	}
 	model, _ := m.handleKey(key("enter"))
@@ -708,7 +737,7 @@ func TestProviderFormMasksTheKey(t *testing.T) {
 	if !strings.Contains(rendered, "*") {
 		t.Fatalf("no mask characters in the key row:\n%s", rendered)
 	}
-	for _, want := range []string{"名称", "地址", "密钥"} {
+	for _, want := range []string{"Name", "API URL", "API Key"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("form missing the %q row:\n%s", want, rendered)
 		}
@@ -722,6 +751,7 @@ func TestProviderFormAndModelSelectDoNotOverflow(t *testing.T) {
 				name  string
 				state appState
 			}{
+				{"setup", stateProviderSetup},
 				{"form", stateProviderForm},
 				{"select", stateModelSelect},
 				{"fetching", stateModelsFetching},
@@ -731,6 +761,7 @@ func TestProviderFormAndModelSelectDoNotOverflow(t *testing.T) {
 				model, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 				m = model.(*Model)
 				m.state = tc.state
+				m.providerSetup = providerSetupCatalog()
 				m.providerForm = newProviderForm(w)
 				m.providerForm.err = "provider \"backup\": base_url 必须是绝对 http(s) 地址"
 				m.modelSelectItems = []string{"m1", "m2", "m3", "m4", "m5"}
@@ -823,7 +854,7 @@ func TestLongMenusScrollWithTheCursor(t *testing.T) {
 		if line := cursorLine(rendered); !strings.Contains(line, "p5") {
 			t.Fatalf("cursor row is %q, want it on p5:\n%s", line, rendered)
 		}
-		if !strings.Contains(rendered, "显示") {
+		if !strings.Contains(rendered, "showing") {
 			t.Fatalf("no window indicator for a scrolled list:\n%s", rendered)
 		}
 		if rows := lineCount(m.renderFrame()); rows > 12 {
@@ -1028,17 +1059,17 @@ func TestGuessedWindowIsMarked(t *testing.T) {
 		m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
 
 		// relay serves gpt-4o, which the built-in table knows.
-		if got := plainText(m.renderContextSegment()); strings.Contains(got, "估") {
+		if got := plainText(m.renderContextSegment()); strings.Contains(got, "est.") {
 			t.Fatalf("known model marked as a guess: %q", got)
 		}
 
 		m.cfg.Provider.Model = "qwen3:30b"
-		if got := plainText(m.renderContextSegment()); !strings.Contains(got, "估") {
+		if got := plainText(m.renderContextSegment()); !strings.Contains(got, "est.") {
 			t.Fatalf("guessed window not marked in the header: %q", got)
 		}
 
 		m.cfg.Provider.ContextWindow = 200000
-		if got := plainText(m.renderContextSegment()); strings.Contains(got, "估") {
+		if got := plainText(m.renderContextSegment()); strings.Contains(got, "est.") {
 			t.Fatalf("explicit window still marked as a guess: %q", got)
 		}
 	})
@@ -1052,7 +1083,7 @@ func TestGuessedWindowIsMarked(t *testing.T) {
 		m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
 
 		status := plainText(m.renderStatus())
-		if !strings.Contains(status, "估值") || !strings.Contains(status, "context_window") {
+		if !strings.Contains(status, "estimated") || !strings.Contains(status, "/model context") {
 			t.Fatalf("status should explain the guessed window:\n%s", status)
 		}
 	})

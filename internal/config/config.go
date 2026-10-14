@@ -23,13 +23,23 @@ type Config struct {
 	Providers []ProviderConfig `json:"providers,omitempty"`
 	// ActiveProvider names the Providers entry Provider was resolved from. It
 	// is persisted so a restart comes back to the provider last written.
-	ActiveProvider string                     `json:"active_provider,omitempty"`
-	MCPServers     map[string]MCPServerConfig `json:"mcpServers"`
-	Workspace      WorkspaceConfig            `json:"workspace"`
-	Web            WebConfig                  `json:"web"`
-	Agent          AgentConfig                `json:"agent"`
-	Memory         MemoryConfig               `json:"memory"`
-	Permissions    PermissionsConfig          `json:"permissions"`
+	ActiveProvider string `json:"active_provider,omitempty"`
+	// ProviderConfigured records whether the global config explicitly contains
+	// a provider catalog. It is runtime metadata only: the default echo provider
+	// also exists when no config file has ever been written, so the resolved
+	// Provider value alone cannot distinguish first-run setup from an explicit
+	// choice of the local echo provider.
+	ProviderConfigured bool `json:"-"`
+	// ProviderConfigurationKnown is false for Config values assembled directly
+	// by older callers. That unknown state preserves their historical behavior;
+	// only a loader that inspected the global file may declare setup missing.
+	ProviderConfigurationKnown bool                       `json:"-"`
+	MCPServers                 map[string]MCPServerConfig `json:"mcpServers"`
+	Workspace                  WorkspaceConfig            `json:"workspace"`
+	Web                        WebConfig                  `json:"web"`
+	Agent                      AgentConfig                `json:"agent"`
+	Memory                     MemoryConfig               `json:"memory"`
+	Permissions                PermissionsConfig          `json:"permissions"`
 	// User and Assistant are the display names shown in the TUI message
 	// labels. Defaults are applied in Load when empty.
 	User      string `json:"user,omitempty"`
@@ -251,11 +261,13 @@ func (c MCPServerConfig) Timeout() time.Duration {
 
 func Default() Config {
 	return Config{
-		Provider:    ProviderConfig{Name: "echo"},
-		MCPServers:  map[string]MCPServerConfig{},
-		User:        "you",
-		Assistant:   "assistant",
-		Permissions: PermissionsConfig{Mode: agent.PermissionModeAsk},
+		Provider:                   ProviderConfig{Name: "echo"},
+		ProviderConfigured:         true,
+		ProviderConfigurationKnown: true,
+		MCPServers:                 map[string]MCPServerConfig{},
+		User:                       "you",
+		Assistant:                  "assistant",
+		Permissions:                PermissionsConfig{Mode: agent.PermissionModeAsk},
 	}
 }
 
@@ -270,9 +282,15 @@ func DefaultDeepSeekProvider() ProviderConfig {
 
 func Load(path string) (Config, error) {
 	cfg := Default()
+	configured := false
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return cfg, err
+		}
+		configured = providerCatalogConfigured(raw)
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return cfg, err
 		}
@@ -283,10 +301,19 @@ func Load(path string) (Config, error) {
 	default:
 		return cfg, err
 	}
+	cfg.ProviderConfigured = configured
+	cfg.ProviderConfigurationKnown = true
 	if err := normalizeConfig(&cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// NeedsProviderSetup reports the one state that should show first-run UI. An
+// unknown source is treated as ready for compatibility with directly-built
+// Config values; Load and LoadWorkspace always make the source known.
+func (c Config) NeedsProviderSetup() bool {
+	return c.ProviderConfigurationKnown && !c.ProviderConfigured
 }
 
 func normalizeConfig(cfg *Config) error {

@@ -44,14 +44,14 @@ func applyProviderCommand(cfg *config.Config, workingDir, input string) provider
 		// The line-mode CLI has no overlay, so the interactive path is not
 		// available here; say so instead of failing obscurely.
 		return providerCommandResult{Message: "usage: /provider add <name> <base_url> [model]" +
-			"（不带参数的交互式新增请运行 TUI：会依次询问名称 / 地址 / 密钥，再拉取模型勾选）"}
+			" (run the TUI for interactive setup: enter name, URL, and key, then select fetched models)"}
 	}
 	previousCatalog := cfg.Providers
 	configPath := ""
 	if cmd.Kind == config.ProviderCommandAdd {
 		configPath, err = config.GlobalConfigPath()
 		if err != nil {
-			return providerCommandResult{Message: fmt.Sprintf("定位全局 config.json 失败：%v", err)}
+			return providerCommandResult{Message: fmt.Sprintf("failed to locate global config.json: %v", err)}
 		}
 	}
 	changed, saved, err := cfg.ApplyProviderCommand(cmd, configPath)
@@ -63,7 +63,7 @@ func applyProviderCommand(cfg *config.Config, workingDir, input string) provider
 		return providerCommandResult{Message: renderProviderList(*cfg)}
 	case config.ProviderCommandAdd:
 		return providerCommandResult{
-			Message: fmt.Sprintf("已写入全局 ~/.mini-opencode/config.json：provider %s → %s（type %s）· 本次进程已切换\n接着在全局 config.json 里补上 api_key / api_key_env，或用 TUI 的 /provider add 表单填写密钥。",
+			Message: fmt.Sprintf("wrote provider %s → %s (type %s) to global ~/.mini-opencode/config.json and switched this process\nNext, set api_key or api_key_env in the global config, or enter the key through the TUI /provider add form.",
 				cfg.Provider.Name, cfg.Provider.BaseURL, cfg.Provider.EffectiveType()) + updatedNote(previousCatalog, cfg.Provider.Name),
 			Changed: changed,
 			Saved:   saved,
@@ -71,11 +71,11 @@ func applyProviderCommand(cfg *config.Config, workingDir, input string) provider
 	default:
 		if !changed {
 			return providerCommandResult{Message: fmt.Sprintf(
-				"provider 未变：%s（%s）", cfg.Provider.Name, cfg.Provider.Summary())}
+				"provider unchanged: %s (%s)", cfg.Provider.Name, cfg.Provider.Summary())}
 		}
 		return providerCommandResult{
 			Changed: true,
-			Message: fmt.Sprintf("已切换到 provider %s · %s · 仅本次进程生效",
+			Message: fmt.Sprintf("switched to provider %s · %s · this process only",
 				cfg.Provider.Name, cfg.Provider.Summary()),
 		}
 	}
@@ -86,7 +86,7 @@ func applyProviderCommand(cfg *config.Config, workingDir, input string) provider
 func updatedNote(before []config.ProviderConfig, name string) string {
 	for _, p := range before {
 		if strings.EqualFold(p.Name, name) {
-			return "（该 provider 已存在，字段已在原条目上更新）"
+			return " (provider already existed; its entry was updated in place)"
 		}
 	}
 	return ""
@@ -106,7 +106,7 @@ func renderProviderList(cfg config.Config) string {
 		fmt.Fprintf(&b, "  %s%s\n", marker, p.Summary())
 	}
 	b.WriteString("  usage: /provider <name> · /provider add <name> <base_url> [model]")
-	b.WriteString("（切换仅本次进程生效；add 会写入全局 ~/.mini-opencode/config.json）")
+	b.WriteString(" (switches apply to this process only; add writes global ~/.mini-opencode/config.json)")
 	return b.String()
 }
 
@@ -119,7 +119,7 @@ func applyModelCommand(cfg *config.Config, workingDir, input string) providerCom
 	if cmd.Context {
 		path, pathErr := config.GlobalConfigPath()
 		if pathErr != nil {
-			return providerCommandResult{Message: fmt.Sprintf("定位全局 config.json 失败：%v", pathErr)}
+			return providerCommandResult{Message: fmt.Sprintf("failed to locate global config.json: %v", pathErr)}
 		}
 		changed, message, err := cfg.ApplyModelContext(cmd, path)
 		if err != nil {
@@ -130,7 +130,7 @@ func applyModelCommand(cfg *config.Config, workingDir, input string) providerCom
 	if cmd.List {
 		if cfg.Provider.EffectiveType() == config.ProviderTypeEcho {
 			return providerCommandResult{Message: fmt.Sprintf(
-				"provider %q 是本地回显，没有可切换的模型", cfg.Provider.Name)}
+				"provider %q is local echo and has no models to switch", cfg.Provider.Name)}
 		}
 		return providerCommandResult{Message: renderModelList(*cfg)}
 	}
@@ -141,12 +141,12 @@ func applyModelCommand(cfg *config.Config, workingDir, input string) providerCom
 	}
 	if !changed {
 		return providerCommandResult{Message: fmt.Sprintf(
-			"模型未变：%s（provider %s）", cmd.ID, cfg.Provider.Name)}
+			"model unchanged: %s (provider %s)", cmd.ID, cfg.Provider.Name)}
 	}
 	_ = previous
 	return providerCommandResult{
 		Changed: true,
-		Message: fmt.Sprintf("已切换模型 %s（provider %s）· 仅本次进程生效", cmd.ID, cfg.Provider.Name),
+		Message: fmt.Sprintf("switched model to %s (provider %s) · this process only", cmd.ID, cfg.Provider.Name),
 	}
 }
 
@@ -167,16 +167,16 @@ type modelFetcher func(ctx context.Context, baseURL, apiKey string) ([]agent.Mod
 // user can still narrow the list by editing the file or running the TUI.
 func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher) providerCommandResult {
 	if fetch == nil {
-		return providerCommandResult{Message: "模型拉取功能不可用（未注入 fetcher）"}
+		return providerCommandResult{Message: "model refresh is unavailable because no fetcher is configured"}
 	}
 	if cfg.Provider.EffectiveType() == config.ProviderTypeEcho {
 		return providerCommandResult{Message: fmt.Sprintf(
-			"provider %q 是本地回显，没有模型列表可拉取。", cfg.Provider.Name)}
+			"provider %q is local echo and has no model catalog to fetch", cfg.Provider.Name)}
 	}
 	key := cfg.Provider.ResolvedAPIKey()
 	if key == "" {
 		return providerCommandResult{Message: fmt.Sprintf(
-			"provider %q 还没有可用的密钥：在全局 ~/.mini-opencode/config.json 里填 api_key / api_key_env，或用 TUI 的 /provider add 表单补上（第三个框写密钥）。",
+			"provider %q has no usable API key: set api_key or api_key_env in global ~/.mini-opencode/config.json, or update it through the TUI /provider add form (the third field is the key).",
 			cfg.Provider.Name)}
 	}
 
@@ -184,11 +184,11 @@ func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher
 	defer cancel()
 	info, err := fetch(ctx, cfg.Provider.BaseURL, key)
 	if err != nil {
-		return providerCommandResult{Message: fmt.Sprintf("拉取模型失败：%v", err)}
+		return providerCommandResult{Message: fmt.Sprintf("failed to fetch models: %v", err)}
 	}
 	if len(info) == 0 {
 		return providerCommandResult{Message: fmt.Sprintf(
-			"%s 没有返回任何模型；用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出。", cfg.Provider.BaseURL)}
+			"%s returned no models; specify one with /model <id>, or list models in global ~/.mini-opencode/config.json.", cfg.Provider.BaseURL)}
 	}
 
 	fetched := make([]string, 0, len(info))
@@ -212,26 +212,26 @@ func applyModelRefresh(cfg *config.Config, workingDir string, fetch modelFetcher
 		}
 		if applied, err := next.SetProviderContextWindow(next.Provider.Name, entry.ContextWindow); err == nil && applied {
 			changed = true
-			windowNote = fmt.Sprintf(" · 窗口 %s（来自 /models）", config.FormatContextWindow(entry.ContextWindow))
+			windowNote = fmt.Sprintf(" · window %s (from /models)", config.FormatContextWindow(entry.ContextWindow))
 		}
 	}
 	if !changed {
 		return providerCommandResult{Message: fmt.Sprintf(
-			"模型列表没有变化（%d 个）：%s", len(merged), strings.Join(merged, ", "))}
+			"model catalog unchanged (%d): %s", len(merged), strings.Join(merged, ", "))}
 	}
 	globalPath, err := config.GlobalConfigPath()
 	if err != nil {
-		return providerCommandResult{Message: fmt.Sprintf("定位全局 config.json 失败：%v", err)}
+		return providerCommandResult{Message: fmt.Sprintf("failed to locate global config.json: %v", err)}
 	}
 	if err := config.SaveProviderCatalog(globalPath, next); err != nil {
-		return providerCommandResult{Message: fmt.Sprintf("写入全局 ~/.mini-opencode/config.json 失败：%v", err)}
+		return providerCommandResult{Message: fmt.Sprintf("failed to write global ~/.mini-opencode/config.json: %v", err)}
 	}
 	*cfg = next
 	return providerCommandResult{
 		Changed: true,
 		Saved:   true,
-		Message: fmt.Sprintf("已从 %s 获取 %d 个模型并写入全局 ~/.mini-opencode/config.json：%s\n当前 model：%s%s（用 /model <id> 切换）",
-			cfg.Provider.BaseURL, len(merged), strings.Join(merged, ", "), cfg.Provider.Model, windowNote),
+		Message: fmt.Sprintf("fetched %d models from %s and wrote them to global ~/.mini-opencode/config.json: %s\nCurrent model: %s%s (switch with /model <id>)",
+			len(merged), cfg.Provider.BaseURL, strings.Join(merged, ", "), cfg.Provider.Model, windowNote),
 	}
 }
 
@@ -241,7 +241,7 @@ func renderModelList(cfg config.Config) string {
 	fmt.Fprintf(&b, "models for provider %s:\n", cfg.Provider.Name)
 	models := cfg.Provider.CatalogModels()
 	if len(models) == 0 {
-		b.WriteString("  (未配置模型；用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出)\n")
+		b.WriteString("  (no model configured; use /model <id>, or list models in global ~/.mini-opencode/config.json)\n")
 	}
 	for _, model := range models {
 		marker := "  "
@@ -250,7 +250,7 @@ func renderModelList(cfg config.Config) string {
 		}
 		fmt.Fprintf(&b, "  %s%s\n", marker, model)
 	}
-	b.WriteString("  /model <id>（仅本次进程生效） · /model context <tokens|1M|auto>（保存上下文窗口）")
+	b.WriteString("  /model <id> (this process only) · /model context <tokens|1M|auto> (save context window)")
 	return b.String()
 }
 
@@ -265,7 +265,7 @@ func configureProviderKey(scanner *bufio.Scanner, out io.Writer, workingDir stri
 	next.Providers = slices.Clone(cfg.Providers)
 	if next.Provider.EffectiveType() == config.ProviderTypeEcho {
 		if !isBareEchoCatalog(next) {
-			return fmt.Errorf("provider %q 是本地回显，不接收密钥；可用 /provider <name> 选择目标提供商：%s",
+			return fmt.Errorf("provider %q is local echo and does not accept an API key; choose a remote provider with /provider <name>: %s",
 				next.Provider.Name, strings.Join(next.ProviderNames(), ", "))
 		}
 		if err := next.AddProvider(config.DefaultDeepSeekProvider()); err != nil {

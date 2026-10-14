@@ -97,6 +97,7 @@ func LoadWorkspace(workDir string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	providerConfigured := providerCatalogConfigured(globalRaw)
 
 	projectPath, found, err := ProjectConfigPath(workDir)
 	if err != nil {
@@ -125,10 +126,32 @@ func LoadWorkspace(workDir string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
+	cfg.ProviderConfigured = providerConfigured
+	cfg.ProviderConfigurationKnown = true
 	if err := normalizeConfig(&cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// providerCatalogConfigured distinguishes an explicit global provider entry
+// from the normalized echo fallback used when no LLM has been configured yet.
+func providerCatalogConfigured(raw map[string]json.RawMessage) bool {
+	if data, ok := raw["providers"]; ok {
+		var providers []ProviderConfig
+		if json.Unmarshal(data, &providers) == nil {
+			for _, provider := range providers {
+				if strings.TrimSpace(provider.Name) != "" {
+					return true
+				}
+			}
+		}
+	}
+	if data, ok := raw["provider"]; ok {
+		var provider ProviderConfig
+		return json.Unmarshal(data, &provider) == nil && strings.TrimSpace(provider.Name) != ""
+	}
+	return false
 }
 
 // SaveProviderCatalog updates only the global provider catalog. It reads and

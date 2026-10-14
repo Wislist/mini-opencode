@@ -19,7 +19,8 @@ import (
 // leave the picker spinning forever, and the whole flow is abandonable anyway.
 const modelFetchTimeout = 20 * time.Second
 
-// providerFormState is the three-field add form: name, endpoint, key.
+// providerFormState is either the custom three-field form (name, endpoint,
+// key) or the key-only form used for a known provider.
 //
 // It is a value (not a pointer) so resetting the form is an assignment, and so
 // a test can build one without a live Model.
@@ -28,6 +29,13 @@ type providerFormState struct {
 	url   textinput.Model
 	key   textinput.Model
 	focus int
+	// preset carries fields that are not edited in the compact known-provider
+	// form, notably its display label and conventional API-key environment name.
+	preset config.ProviderConfig
+	known  bool
+	// returnToSetup makes esc go back to the first-run provider picker instead
+	// of closing the whole flow.
+	returnToSetup bool
 	// err is the validation or fetch error shown inside the form. Keeping it
 	// here rather than in the transcript is deliberate: the message belongs
 	// next to the fields it is about, and the fields must stay editable.
@@ -47,9 +55,9 @@ func newProviderForm(width int) providerFormState {
 		return input
 	}
 	form := providerFormState{
-		name: field("例如 relay"),
+		name: field("e.g. relay"),
 		url:  field("https://relay.example.com/v1"),
-		key:  field("sk-...（可留空，稍后用同名 /provider add 或 api_key_env 配置）"),
+		key:  field("Paste API key (optional for custom providers)"),
 	}
 	// The key is masked: a screen full of credentials survives screenshots,
 	// shoulder surfing and screen sharing far longer than it should.
@@ -58,14 +66,29 @@ func newProviderForm(width int) providerFormState {
 	return form
 }
 
+func newKnownProviderForm(width int, provider config.ProviderConfig, returnToSetup bool) providerFormState {
+	form := newProviderForm(width)
+	form.preset = provider
+	form.known = true
+	form.returnToSetup = returnToSetup
+	form.name.SetValue(provider.Name)
+	form.url.SetValue(provider.BaseURL)
+	form.name.Blur()
+	form.url.Blur()
+	form.key.Focus()
+	form.focus = 2
+	if provider.APIKey != "" {
+		form.key.SetValue(provider.APIKey)
+	}
+	return form
+}
+
 // pendingProviderAdd is a provider the form has collected but not yet written.
 //
 // Nothing is persisted before the model selection is confirmed, so cancelling
 // anywhere in the flow leaves the configuration exactly as it was.
 type pendingProviderAdd struct {
-	name string
-	url  string
-	key  string
+	provider config.ProviderConfig
 	// refresh marks the /model refresh flow, which edits the active provider
 	// instead of adding one.
 	refresh bool
@@ -82,6 +105,14 @@ type modelsFetchedMsg struct {
 // openProviderForm enters the add form with empty fields.
 func (m *Model) openProviderForm() {
 	m.providerForm = newProviderForm(m.providerFormWidth())
+	m.pendingAdd = nil
+	m.state = stateProviderForm
+	m.invalidateFooter()
+	m.refreshViewport()
+}
+
+func (m *Model) openKnownProviderForm(provider config.ProviderConfig, returnToSetup bool) {
+	m.providerForm = newKnownProviderForm(m.providerFormWidth(), provider, returnToSetup)
 	m.pendingAdd = nil
 	m.state = stateProviderForm
 	m.invalidateFooter()
@@ -109,10 +140,33 @@ func (m *Model) providerFormField(index int) *textinput.Model {
 	}
 }
 
+func (m *Model) providerFormFieldIndexes() []int {
+	if m.providerForm.known {
+		return []int{2}
+	}
+	return []int{0, 1, 2}
+}
+
+func (m *Model) moveProviderFormFocus(delta int) {
+	indexes := m.providerFormFieldIndexes()
+	position := 0
+	for i, index := range indexes {
+		if index == m.providerForm.focus {
+			position = i
+			break
+		}
+	}
+	position = ((position+delta)%len(indexes) + len(indexes)) % len(indexes)
+	m.focusProviderFormField(indexes[position])
+}
+
 // focusProviderFormField moves focus, wrapping at both ends so tab and
 // shift+tab always land somewhere.
 func (m *Model) focusProviderFormField(index int) {
 	index = ((index % providerFormFields) + providerFormFields) % providerFormFields
+	if m.providerForm.known {
+		index = 2
+	}
 	for i := 0; i < providerFormFields; i++ {
 		if i == index {
 			m.providerFormField(i).Focus()
@@ -126,9 +180,14 @@ func (m *Model) focusProviderFormField(index int) {
 }
 
 func (m *Model) closeProviderForm() (tea.Model, tea.Cmd) {
+	returnToSetup := m.providerForm.returnToSetup
 	m.state = stateIdle
 	m.pendingAdd = nil
 	m.providerForm = providerFormState{}
+	if returnToSetup {
+		m.openProviderSetup()
+		return m, nil
+	}
 	m.invalidateFooter()
 	m.refreshViewport()
 	return m, m.input.Focus()
@@ -138,10 +197,18 @@ func (m *Model) closeProviderForm() (tea.Model, tea.Cmd) {
 func (m *Model) handleProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "tab", "down", "ctrl+n":
-		m.focusProviderFormField(m.providerForm.focus + 1)
+		m.moveProviderFormFocus(1)
 		return m, nil
 	case "shift+tab", "up", "ctrl+p":
-		m.focusProviderFormField(m.providerForm.focus - 1)
+		m.moveProviderFormFocus(-1)
+		return m, nil
+	case "ctrl+e":
+		if m.providerForm.known {
+			m.providerForm.known = false
+			m.focusProviderFormField(1)
+			m.invalidateFooter()
+			m.refreshViewport()
+		}
 		return m, nil
 	case "enter":
 		return m.submitProviderForm()
@@ -154,13 +221,16 @@ func (m *Model) handleProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// submitProviderForm validates what was typed and either saves immediately (no
-// key: nothing to fetch, and the user may be using api_key_env) or asks the
-// provider which models it serves.
+// submitProviderForm validates what was typed and either saves a custom
+// keyless endpoint or asks the provider which models it serves. Known remote
+// providers require a typed key or their conventional environment variable.
 func (m *Model) submitProviderForm() (tea.Model, tea.Cmd) {
-	entry := config.ProviderConfig{
-		Name:    strings.TrimSpace(m.providerForm.name.Value()),
-		BaseURL: strings.TrimSpace(m.providerForm.url.Value()),
+	entry := m.providerForm.preset
+	entry.Name = strings.TrimSpace(m.providerForm.name.Value())
+	entry.BaseURL = strings.TrimSpace(m.providerForm.url.Value())
+	key := strings.TrimSpace(m.providerForm.key.Value())
+	if key != "" {
+		entry.APIKey = key
 	}
 	if err := entry.Validate(); err != nil {
 		m.providerForm.err = err.Error()
@@ -168,15 +238,29 @@ func (m *Model) submitProviderForm() (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
-	key := strings.TrimSpace(m.providerForm.key.Value())
-	m.pendingAdd = &pendingProviderAdd{name: entry.Name, url: entry.BaseURL, key: key}
+	m.pendingAdd = &pendingProviderAdd{provider: entry}
 	m.providerForm.err = ""
 
-	if key == "" {
-		m.savePendingProvider(nil)
+	resolvedKey := entry.ResolvedAPIKey()
+	if resolvedKey == "" && m.providerForm.known {
+		envHint := ""
+		if entry.APIKeyEnv != "" {
+			envHint = ", or set " + entry.APIKeyEnv
+		}
+		m.pendingAdd = nil
+		m.providerForm.err = "API key is required" + envHint
+		m.invalidateFooter()
+		m.refreshViewport()
+		return m, nil
+	}
+	if resolvedKey == "" {
+		if !m.savePendingProvider(nil) {
+			return m, nil
+		}
+		m.providerForm.returnToSetup = false
 		return m.closeProviderForm()
 	}
-	return m.startModelsFetch(entry.BaseURL, key)
+	return m.startModelsFetch(entry.BaseURL, resolvedKey)
 }
 
 // startModelsFetch switches to the waiting state and schedules the request.
@@ -212,13 +296,19 @@ func (m *Model) modelsFetched(msg modelsFetchedMsg) (tea.Model, tea.Cmd) {
 		// endpoint to fix a typo in one character is the kind of friction that
 		// makes a user give up on the picker.
 		m.state = stateProviderForm
-		m.providerForm.err = "拉取模型失败：" + msg.err.Error()
+		m.providerForm.err = "Failed to fetch models: " + msg.err.Error()
 		m.invalidateFooter()
 		m.refreshViewport()
 		return m, nil
 	}
 	if len(msg.models) == 0 {
-		m.savePendingProvider(nil)
+		m.state = stateProviderForm
+		if !m.savePendingProvider(nil) {
+			m.invalidateFooter()
+			m.refreshViewport()
+			return m, nil
+		}
+		m.providerForm.returnToSetup = false
 		return m.closeProviderForm()
 	}
 
@@ -271,10 +361,30 @@ func (m *Model) renderProviderForm() string {
 		m.providerFormField(i).SetWidth(width)
 	}
 
-	labels := []string{"名称", "地址", "密钥"}
+	if m.providerForm.known {
+		label := m.providerForm.preset.DisplayName()
+		if label == "" {
+			label = m.providerForm.name.Value()
+		}
+		lines := []string{
+			keyLabel.Render("Connect to "+label+":") + "  " + dimStyle.Render("enter verify · esc back · ctrl+e advanced edit"),
+			dimStyle.Render("API URL  ") + m.providerForm.url.Value(),
+			"▶ " + toolName.Render("API Key") + "  " + m.providerForm.key.View(),
+		}
+		if m.providerForm.err != "" {
+			lines = append(lines, errorStyle.Render("! "+m.providerForm.err))
+		} else if env := strings.TrimSpace(m.providerForm.preset.APIKeyEnv); env != "" {
+			lines = append(lines, dimStyle.Render("Leave blank to use "+env+"; global config is written only after verification and model selection."))
+		} else {
+			lines = append(lines, dimStyle.Render("Global ~/.mini-opencode/config.json is written only after verification and model selection."))
+		}
+		return sessionBox.Width(w).Render(strings.Join(m.wrapMenuRows(lines, inner, 3), "\n"))
+	}
+
+	labels := []string{"Name", "API URL", "API Key"}
 	lines := []string{
-		keyLabel.Render("新增提供商:") + "  " +
-			dimStyle.Render("tab/↑↓ 切换 · enter 提交 · esc 取消"),
+		keyLabel.Render("Add provider:") + "  " +
+			dimStyle.Render("tab/↑↓ move · enter submit · esc cancel"),
 	}
 	for i, label := range labels {
 		marker := "  "
@@ -286,7 +396,7 @@ func (m *Model) renderProviderForm() string {
 	if m.providerForm.err != "" {
 		lines = append(lines, errorStyle.Render("! "+m.providerForm.err))
 	} else {
-		lines = append(lines, dimStyle.Render("提交后会向该地址请求 /models，再让你勾选可用模型。"))
+		lines = append(lines, dimStyle.Render("Submitting requests /models from this URL, then lets you select available models."))
 	}
 	// Only the header and the three fields are essential. At eight rows nothing
 	// more fits, and dropping the trailing hint (or the error line) is a far
@@ -306,20 +416,23 @@ func toolLabelStyle(focused bool, label string) string {
 // request is in flight and that esc abandons it.
 func (m *Model) renderModelsFetching() string {
 	w := boxWidth(m)
+	if w < 32 {
+		return sessionBox.Width(w).Render(keyLabel.Render("Fetching · esc"))
+	}
 	name := ""
 	if m.pendingAdd != nil {
-		name = m.pendingAdd.name + "  "
+		name = m.pendingAdd.provider.Name + "  "
 	}
-	content := keyLabel.Render("拉取模型列表:") + "  " +
-		dimStyle.Render(name+"请求 "+providerFetchURL(m.pendingAdd)+" · esc 取消")
+	content := keyLabel.Render("Fetch models:") + "  " +
+		dimStyle.Render(name+"requesting "+providerFetchURL(m.pendingAdd)+" · esc cancel")
 	return sessionBox.Width(w).Render(content)
 }
 
 func providerFetchURL(pending *pendingProviderAdd) string {
 	if pending == nil {
-		return "(当前 provider)"
+		return "(current provider)"
 	}
-	return strings.TrimRight(pending.url, "/") + "/models"
+	return strings.TrimRight(pending.provider.BaseURL, "/") + "/models"
 }
 
 // renderModelSelect draws the fetched-model multi-select.
@@ -335,8 +448,8 @@ func (m *Model) renderModelSelect() string {
 	}
 	start, end := visibleMenuWindow(len(m.modelSelectItems), m.modelSelectCursor, m.menuItemBudget())
 	lines := []string{
-		keyLabel.Render("选择模型:") + "  " + dimStyle.Render(fmt.Sprintf(
-			"space 勾选 · a 全选/全不选 · enter 确认（%d/%d）· esc 取消%s",
+		keyLabel.Render("Select models:") + "  " + dimStyle.Render(fmt.Sprintf(
+			"space toggle · a select/clear all · enter confirm (%d/%d) · esc cancel%s",
 			checked, len(m.modelSelectItems), windowLabel(start, end, len(m.modelSelectItems)))),
 	}
 	for i := start; i < end; i++ {
@@ -356,7 +469,7 @@ func (m *Model) renderModelSelect() string {
 	if m.modelSelectErr != "" {
 		lines = append(lines, errorStyle.Render("! "+m.modelSelectErr))
 	} else {
-		lines = append(lines, dimStyle.Render("勾选的模型会写进全局 ~/.mini-opencode/config.json 的 models，第一个勾选的成为当前 model。"))
+		lines = append(lines, dimStyle.Render("Selected models are saved to global ~/.mini-opencode/config.json; the first selected model becomes active."))
 	}
 	return sessionBox.Width(w).Render(strings.Join(m.wrapMenuRows(lines, inner, 1+(end-start)), "\n"))
 }
@@ -413,12 +526,14 @@ func (m *Model) confirmModelSelection() (tea.Model, tea.Cmd) {
 	if len(selected) == 0 {
 		// A provider with no model cannot answer a single request, so an empty
 		// selection is a dead end rather than a valid choice.
-		m.modelSelectErr = "至少勾选一个模型（a 可全选）"
+		m.modelSelectErr = "Select at least one model (press a to select all)"
 		m.invalidateFooter()
 		m.refreshViewport()
 		return m, nil
 	}
-	m.savePendingProvider(selected)
+	if !m.savePendingProvider(selected) {
+		return m, nil
+	}
 	return m.closeModelSelect()
 }
 
@@ -450,71 +565,72 @@ func (m *Model) closeModelSelect() (tea.Model, tea.Cmd) {
 // The complete provider entry is staged in a copy and written to the global
 // config before it replaces live state. A failed write leaves memory and disk
 // on the same catalog.
-func (m *Model) savePendingProvider(models []string) {
+func (m *Model) savePendingProvider(models []string) bool {
 	pending := m.pendingAdd
 	if pending == nil {
-		return
+		return false
 	}
 	path, err := config.GlobalConfigPath()
 	if err != nil {
-		m.addBlock(errorStyle.Render("✗ 定位全局 config.json 失败：" + err.Error()))
+		m.addBlock(errorStyle.Render("✗ Failed to locate global config.json: " + err.Error()))
 		m.refreshViewport()
-		return
+		return false
 	}
 	next := *m.cfg
 	next.Providers = slices.Clone(m.cfg.Providers)
 	if pending.refresh {
-		if _, err := next.SetProviderModels(pending.name, models, ""); err != nil {
+		if _, err := next.SetProviderModels(pending.provider.Name, models, ""); err != nil {
 			m.addBlock(errorStyle.Render("✗ " + err.Error()))
 			m.refreshViewport()
-			return
+			return false
 		}
-		windowNote := m.applyFetchedWindowTo(&next, pending.name)
+		windowNote := m.applyFetchedWindowTo(&next, pending.provider.Name)
 		if err := config.SaveProviderCatalog(path, next); err != nil {
-			m.addBlock(errorStyle.Render("✗ 写入全局 ~/.mini-opencode/config.json 失败：" + err.Error()))
+			m.addBlock(errorStyle.Render("✗ Failed to write global ~/.mini-opencode/config.json: " + err.Error()))
 			m.refreshViewport()
-			return
+			return false
 		}
 		*m.cfg = next
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已更新 provider %s 的模型（%d 个）· 当前 %s%s",
-			pending.name, len(m.cfg.Provider.CatalogModels()), m.cfg.Provider.Model, windowNote)))
+		m.addBlock(toolArrow.Render(fmt.Sprintf("Updated provider %s models (%d) · active %s%s",
+			pending.provider.Name, len(m.cfg.Provider.CatalogModels()), m.cfg.Provider.Model, windowNote)))
 		m.rebuildWithNotice()
-		return
+		return true
 	}
 
-	entry := config.ProviderConfig{Name: pending.name, BaseURL: pending.url, APIKey: pending.key}
+	entry := pending.provider
 	if err := next.AddProvider(entry); err != nil {
 		m.addBlock(errorStyle.Render("✗ " + err.Error()))
 		m.refreshViewport()
-		return
+		return false
 	}
-	if _, err := next.SetProviderModels(pending.name, models, ""); err != nil {
+	if _, err := next.SetProviderModels(entry.Name, models, ""); err != nil {
 		m.addBlock(errorStyle.Render("✗ " + err.Error()))
 		m.refreshViewport()
-		return
+		return false
 	}
-	windowNote := m.applyFetchedWindowTo(&next, pending.name)
+	windowNote := m.applyFetchedWindowTo(&next, entry.Name)
 	if err := config.SaveProviderCatalog(path, next); err != nil {
-		m.addBlock(errorStyle.Render("✗ 写入全局 ~/.mini-opencode/config.json 失败：" + err.Error()))
+		m.addBlock(errorStyle.Render("✗ Failed to write global ~/.mini-opencode/config.json: " + err.Error()))
 		m.refreshViewport()
-		return
+		return false
 	}
 	*m.cfg = next
 
 	switch {
-	case pending.key == "" && len(models) == 0:
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s（已验证并写入全局 ~/.mini-opencode/config.json）",
-			pending.name, pending.url)))
-		m.addBlock(dimStyle.Render("未填密钥，因此没有拉取模型：设置 api_key_env，或用 /provider add 以同名提供商补上密钥（第三个框），再用 /model refresh 拉取。"))
+	case entry.ResolvedAPIKey() == "" && len(models) == 0:
+		m.addBlock(toolArrow.Render(fmt.Sprintf("Added provider %s → %s (verified and saved to global ~/.mini-opencode/config.json)",
+			entry.Name, entry.BaseURL)))
+		m.addBlock(dimStyle.Render("No models were fetched because no key was provided. Set api_key_env, or update the same provider with /provider add and enter the key in the third field, then run /model refresh."))
 	case len(models) == 0:
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s（已验证并写入全局 ~/.mini-opencode/config.json）",
-			pending.name, pending.url)))
-		m.addBlock(dimStyle.Render("该地址没有返回任何模型：用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出。"))
+		m.addBlock(toolArrow.Render(fmt.Sprintf("Added provider %s → %s (verified and saved to global ~/.mini-opencode/config.json)",
+			entry.Name, entry.BaseURL)))
+		m.addBlock(dimStyle.Render("This endpoint returned no models. Use /model <id>, or list models in global ~/.mini-opencode/config.json."))
 	default:
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已新增 provider %s → %s，模型 %d 个，当前 %s%s",
-			pending.name, pending.url, len(m.cfg.Provider.CatalogModels()), m.cfg.Provider.Model, windowNote)))
+		m.addBlock(toolArrow.Render(fmt.Sprintf("Added provider %s → %s, %d models, active %s%s",
+			entry.Name, entry.BaseURL, len(m.cfg.Provider.CatalogModels()), m.cfg.Provider.Model, windowNote)))
 	}
 	m.rebuildWithNotice()
+	return true
 }
 
 // applyFetchedWindow records the context length the provider reported for the
@@ -540,33 +656,33 @@ func (m *Model) applyFetchedWindowTo(cfg *config.Config, providerName string) st
 	if err != nil || !changed {
 		return ""
 	}
-	return fmt.Sprintf(" · 窗口 %s（来自 /models）", config.FormatContextWindow(window))
+	return fmt.Sprintf(" · window %s (from /models)", config.FormatContextWindow(window))
 }
 
 // refreshModels re-fetches the model list for the active provider.
 func (m *Model) refreshModels() (tea.Model, tea.Cmd) {
 	if m.state != stateIdle {
-		m.addBlock(errorStyle.Render("请等待当前操作结束，再拉取模型。"))
+		m.addBlock(errorStyle.Render("Wait for the current operation to finish before fetching models."))
 		m.refreshViewport()
 		return m, nil
 	}
 	if m.cfg.Provider.EffectiveType() == config.ProviderTypeEcho {
 		m.addBlock(dimStyle.Render(fmt.Sprintf(
-			"provider %q 是本地回显，没有模型列表可拉取。", m.cfg.Provider.Name)))
+			"Provider %q is local echo and has no model catalog to fetch.", m.cfg.Provider.Name)))
 		m.refreshViewport()
 		return m, nil
 	}
 	key := m.cfg.Provider.ResolvedAPIKey()
 	if key == "" {
 		// The env var may be unset, so name the field rather than an empty
-		// string: "设置 " with nothing after it reads as a bug.
+		// string: "set " with nothing after it reads as a bug.
 		m.addBlock(errorStyle.Render(fmt.Sprintf(
-			"provider %q 还没有可用的密钥：用 /provider add 以同名提供商补上（第三个框写密钥），或在全局 ~/.mini-opencode/config.json 里填 api_key / api_key_env。",
+			"Provider %q has no usable API key. Update the same provider with /provider add and enter the key in the third field, or set api_key / api_key_env in global ~/.mini-opencode/config.json.",
 			m.cfg.Provider.Name)))
 		m.refreshViewport()
 		return m, nil
 	}
-	m.pendingAdd = &pendingProviderAdd{name: m.cfg.Provider.Name, url: m.cfg.Provider.BaseURL, refresh: true}
+	m.pendingAdd = &pendingProviderAdd{provider: m.cfg.Provider, refresh: true}
 	return m.startModelsFetch(m.cfg.Provider.BaseURL, key)
 }
 

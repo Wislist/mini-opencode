@@ -46,7 +46,7 @@ go run ./cmd/mini-opencode
 ./scripts/build.ps1
 ```
 
-没有配置文件时使用内置 `echo` provider，可以先进入界面查看交互。接入模型时，在 TUI 输入 `/provider add`，依次填写名称、OpenAI-compatible 地址和密钥；程序会拉取 `/models`，确认模型后才写入全局配置。
+没有配置 Provider 时，TUI 会显示首次配置引导，普通消息不会发送给内部 `echo` fallback。按 Enter 先选择 DeepSeek、OpenAI、OpenRouter、自定义 OpenAI-compatible 或本地 Echo；已知供应商只需填写 API Key，自定义供应商再填写名称、地址和密钥。程序验证连接并拉取 `/models`，确认模型后才一次性写入全局配置。`/provider add` 仍保留三框高级入口。
 
 ## 工作方式
 
@@ -82,7 +82,7 @@ go run ./cmd/mini-opencode
 
 ### Provider 与扩展
 
-- 内置 `echo`，支持多个 OpenAI-compatible provider、自定义名称、端点、模型目录与上下文窗口。
+- 内置 `echo` 作为启动 fallback，也可由用户显式选择；支持多个 OpenAI-compatible provider、自定义名称、端点、模型目录与上下文窗口。
 - 会话中切换 provider 或 model 会保留对话；切换只影响当前进程，新增、刷新和窗口设置写入全局配置。
 - MCP 支持 `stdio`、streamable HTTP 与 legacy SSE，工具名以 `<server>__<tool>` 注册。
 - 内置文件、shell、todo、只读子 agent、Web、skill 安装与 memory 工具。

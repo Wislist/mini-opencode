@@ -37,6 +37,7 @@ func RunTUI(ctx context.Context) error {
 	}
 
 	model := tui.New(&cfg, workingDir, version)
+	installTUIModelFetcher(model)
 	memoryStore := memory.NewStore(workingDir)
 	memoryRetriever, closeMemoryRetriever := newMemoryRetriever(&cfg, workingDir, memoryStore)
 	defer closeMemoryRetriever()
@@ -138,6 +139,12 @@ func RunTUI(ctx context.Context) error {
 
 	_, err = p.Run()
 	return err
+}
+
+func installTUIModelFetcher(model *tui.Model) {
+	model.SetModelFetcher(func(ctx context.Context, baseURL, apiKey string) ([]agent.ModelInfo, error) {
+		return agent.FetchModelCatalog(ctx, baseURL, apiKey, 0)
+	})
 }
 
 // tuiRuntimeExtras assembles the runtime dependencies for the TUI, including
@@ -258,6 +265,11 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 func startRuntime(workingDir string, cfg *config.Config, model *tui.Model, extras runtimeExtras) (*agent.Runtime, error) {
 	rt, err := newTUIRuntime(workingDir, *cfg, model, extras)
 	if err == nil {
+		if cfg.NeedsProviderSetup() {
+			model.SetLLMStatus(tui.LLMUnconfigured, "")
+		} else {
+			model.SetLLMStatus(tui.LLMReady, "")
+		}
 		return rt, nil
 	}
 	fallback := *cfg
@@ -267,6 +279,7 @@ func startRuntime(workingDir string, cfg *config.Config, model *tui.Model, extra
 		// The provider was not the problem; report the original failure.
 		return nil, err
 	}
+	model.SetLLMStatus(tui.LLMUnavailable, err.Error())
 	return echoRuntime, nil
 }
 

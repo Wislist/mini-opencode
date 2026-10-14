@@ -68,8 +68,12 @@ func (m *Model) renderFrame() string {
 	m.fitViewport(header, footer)
 	m.updateNativeCursorPosition(header, footer)
 
+	body := m.viewport.View()
+	if len(m.blocks) == 0 && m.llmStatus != LLMReady {
+		body = m.renderLLMEmptyState()
+	}
 	sections := make([]string, 0, len(footer)+2)
-	sections = append(sections, header, m.viewport.View())
+	sections = append(sections, header, body)
 	// Drop whole optional sections until the frame fits. The prompt box grows
 	// with its content, so in a short terminal the fixed parts can exceed the
 	// window; trimming the assembled string instead would cut a box open.
@@ -128,7 +132,7 @@ func (m *Model) footerKinds() []footerSection {
 		kinds = append(kinds, footerSectionOther)
 	case m.state == stateSessionList:
 		kinds = append(kinds, footerSectionOther)
-	case m.state == stateProviderMenu, m.state == stateModelMenu:
+	case m.state == stateProviderMenu, m.state == stateModelMenu, m.state == stateProviderSetup:
 		kinds = append(kinds, footerSectionOther)
 	case m.state == stateProviderForm, m.state == stateModelsFetching, m.state == stateModelSelect:
 		kinds = append(kinds, footerSectionOther)
@@ -175,6 +179,8 @@ func (m *Model) buildFooter() []string {
 		sections = append(sections, m.renderProviderMenu())
 	} else if m.state == stateModelMenu {
 		sections = append(sections, m.renderModelMenu())
+	} else if m.state == stateProviderSetup {
+		sections = append(sections, m.renderProviderSetup())
 	} else if m.state == stateProviderForm {
 		sections = append(sections, m.renderProviderForm())
 	} else if m.state == stateModelsFetching {
@@ -226,7 +232,7 @@ func (m *Model) renderHeader() string {
 	// header never overflows or overlaps itself.
 	gitSeg := m.renderGitSegment()
 	modeSeg := m.renderModeSegment() + dimStyle.Render(" ["+m.PermissionMode().Label()+"]")
-	versionSeg := dimStyle.Render(fmt.Sprintf("v%s · %s", m.version, m.cfg.Provider.Name))
+	versionSeg := dimStyle.Render(fmt.Sprintf("v%s · %s", m.version, m.llmHeaderLabel()))
 	ctxSeg := m.renderContextSegment()
 
 	// Build the right side: context and version are the first things to yield.
@@ -605,6 +611,7 @@ func (m *Model) renderStatus() string {
 	var lines []string
 	lines = append(lines, toolName.Render("status:"))
 	lines = append(lines, fmt.Sprintf("  permissions: %s · %s", m.PermissionMode(), m.PermissionMode().Label()))
+	lines = append(lines, "  provider: "+m.llmHeaderLabel())
 	if m.gitStatus.Available {
 		lines = append(lines, "  "+cmdStyle.Render("git")+"  branch: "+m.gitStatus.Branch)
 		lines = append(lines, fmt.Sprintf("  staged: %d  modified: %d  untracked: %d",
@@ -629,7 +636,7 @@ func (m *Model) renderStatus() string {
 		if m.cfg.Provider.ContextWindowIsGuess() && m.cfg.Provider.EffectiveType() != config.ProviderTypeEcho {
 			// Say what to do about it, not just that it is a guess.
 			warning := fmt.Sprintf(
-				"  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：用 /model context <tokens> 设置 context_window，或跑 /model refresh 从 /models 读取",
+				"  ⚠ Window %s is estimated because model %q is not in the built-in catalog. Set it with /model context <tokens>, or run /model refresh to read it from /models.",
 				formatTokens(window), m.cfg.Provider.Model)
 			for _, wl := range wrapLine(dimStyle.Render(warning), m.width) {
 				lines = append(lines, wl)
@@ -792,7 +799,7 @@ func contextPercent(used, window int) float64 {
 func renderContextBar(pct float64, conversationTokens int, guessed bool) string {
 	label := fmt.Sprintf("ctx %.0f%%", pct)
 	if guessed {
-		label += " (估)"
+		label += " (est.)"
 	}
 	if conversationTokens > 0 {
 		label += fmt.Sprintf(" · %s chat", formatTokens(conversationTokens))

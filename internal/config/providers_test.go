@@ -484,7 +484,7 @@ func TestProviderKeySource(t *testing.T) {
 		{name: "inline", cfg: ProviderConfig{Name: "relay", APIKey: "sk"}, want: "config"},
 		{name: "env", cfg: ProviderConfig{Name: "relay", APIKeyEnv: "MINI_OPENCODE_TEST_KEY_SOURCE"}, want: "env"},
 		{name: "missing", cfg: ProviderConfig{Name: "nothing"}, want: "missing"},
-		{name: "env unset", cfg: ProviderConfig{Name: "nothing", APIKeyEnv: "MINI_OPENCODE_TEST_UNSET"}, want: "未设置"},
+		{name: "env unset", cfg: ProviderConfig{Name: "nothing", APIKeyEnv: "MINI_OPENCODE_TEST_UNSET"}, want: "not set"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -505,7 +505,7 @@ func TestProviderSummary(t *testing.T) {
 		}
 	}
 	echo := ProviderConfig{Name: "echo", Type: "echo"}
-	if got := echo.Summary(); !strings.Contains(got, "本地回显") {
+	if got := echo.Summary(); !strings.Contains(got, "local echo") {
 		t.Fatalf("echo Summary() = %q", got)
 	}
 }
@@ -870,23 +870,23 @@ func TestSetProviderContextWindow(t *testing.T) {
 
 func TestProviderSummaryShowsTheWindowAndMarksAGuess(t *testing.T) {
 	known := ProviderConfig{Name: "relay", BaseURL: "https://relay.example.com/v1", Model: "gpt-4o"}
-	if got := known.Summary(); !strings.Contains(got, "128k") || strings.Contains(got, "估") {
+	if got := known.Summary(); !strings.Contains(got, "128k") || strings.Contains(got, "estimated") {
 		t.Fatalf("known window Summary() = %q", got)
 	}
 
 	guessed := ProviderConfig{Name: "relay", BaseURL: "https://relay.example.com/v1", Model: "qwen3:30b"}
-	if got := guessed.Summary(); !strings.Contains(got, "估") {
+	if got := guessed.Summary(); !strings.Contains(got, "estimated") {
 		t.Fatalf("guessed window Summary() = %q, want it marked", got)
 	}
 
 	explicit := ProviderConfig{Name: "relay", BaseURL: "https://relay.example.com/v1", Model: "qwen3:30b", ContextWindow: 200000}
 	got := explicit.Summary()
-	if !strings.Contains(got, "200k") || strings.Contains(got, "估") {
+	if !strings.Contains(got, "200k") || strings.Contains(got, "estimated") {
 		t.Fatalf("explicit window Summary() = %q", got)
 	}
 
 	echoes := ProviderConfig{Name: "echo", Type: ProviderTypeEcho}
-	if got := echoes.Summary(); strings.Contains(got, "窗口") {
+	if got := echoes.Summary(); strings.Contains(got, "window") {
 		t.Fatalf("echo Summary() = %q, want no window segment", got)
 	}
 }

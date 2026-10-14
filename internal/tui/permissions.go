@@ -16,7 +16,7 @@ func (m *Model) PermissionMode() agent.PermissionMode {
 
 func (m *Model) handlePermissions(input string) (tea.Model, tea.Cmd) {
 	if m.state != stateIdle {
-		m.addBlock(errorStyle.Render("请等待当前操作结束，再切换权限模式。"))
+		m.addBlock(errorStyle.Render("Wait for the current operation to finish before changing permissions."))
 		m.refreshViewport()
 		return m, nil
 	}

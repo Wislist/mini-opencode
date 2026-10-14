@@ -3,11 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
-	"github.com/wislist/mini-opencode/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wislist/mini-opencode/internal/config"
 )
 
 // removedCommands are the slash commands the CLI and TUI no longer accept.
@@ -16,6 +17,7 @@ var removedCommands = []string{"/help", "/version", "/tools", "/plan", "/workspa
 func TestCLIRemovedCommandsAreUnknown(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
+	setTestHome(t, filepath.Join(dir, "home"))
 
 	var out bytes.Buffer
 	input := strings.Join([]string{
@@ -43,6 +45,7 @@ func TestCLIRemovedCommandsAreUnknown(t *testing.T) {
 func TestCLIUnknownCommandHintDoesNotPointAtHelp(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
+	setTestHome(t, filepath.Join(dir, "home"))
 
 	var out bytes.Buffer
 	if err := Run(context.Background(), strings.NewReader("/nope\n/quit\n"), &out); err != nil {
@@ -60,6 +63,7 @@ func TestCLIUnknownCommandHintDoesNotPointAtHelp(t *testing.T) {
 func TestCLIStartupBannerListsOnlyRemainingCommands(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
+	setTestHome(t, filepath.Join(dir, "home"))
 
 	var out bytes.Buffer
 	if err := Run(context.Background(), strings.NewReader("/quit\n"), &out); err != nil {

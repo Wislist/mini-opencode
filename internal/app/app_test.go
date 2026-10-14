@@ -53,13 +53,13 @@ func TestSetVersionIgnoresEmpty(t *testing.T) {
 	}
 }
 
-func TestConfirmToolAcceptsChineseAllow(t *testing.T) {
+func TestConfirmToolRejectsUnknownAnswer(t *testing.T) {
 	scanner := bufio.NewScanner(strings.NewReader("允许\n"))
 	var out bytes.Buffer
 	confirm := confirmTool(scanner, &out, map[string]bool{}, t.TempDir())
 
-	if !confirm(context.Background(), agent.ToolCall{Name: "bash"}, agent.ToolResult{}) {
-		t.Fatal("expected confirmation to be accepted")
+	if confirm(context.Background(), agent.ToolCall{Name: "bash"}, agent.ToolResult{}) {
+		t.Fatal("unknown confirmation answer should be rejected")
 	}
 }
 

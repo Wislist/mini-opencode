@@ -53,6 +53,13 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
+	if m.llmStatus != LLMReady {
+		m.input.SetValue(input)
+		m.input.CursorEnd()
+		m.syncInputHeight()
+		m.openProviderRecoveryForm()
+		return m, nil
+	}
 
 	if m.runtime == nil {
 		m.addBlock(errorStyle.Render(runtimeUnavailableMessage))

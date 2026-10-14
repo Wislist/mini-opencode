@@ -47,7 +47,7 @@
 
 1. `providers` 非空时，**它就是整个目录**，旧的单 `provider` 块被忽略。
 2. `providers` 为空时，旧的 `provider` 块（如果有）仅作为迁移输入，读取后转为目录。
-3. 都不存在时是内置的 `echo`。
+3. 都不存在时运行时仍解析为内置 `echo` fallback，但 TUI 会标记为“未配置模型”，普通消息不会进入该 fallback。
 4. 激活项：`active_provider` 指定的那一项；没写就是目录里的**第一项**。
    `active_provider` 写了但名字不存在会**报错**（列出已配置的名字），不会静默回落到第一项。
 
@@ -86,7 +86,41 @@
 /model deepseek-chat                              # 切换模型（仅本次进程生效）
 ```
 
-### 新增供应商（三框表单 + 拉取模型）
+### 首次配置（选择供应商 + 填写密钥）
+
+全局配置中没有 Provider 时，TUI 不会把普通消息交给内部 `echo` fallback。按 Enter 或尝试
+发送草稿会先打开供应商选择层；草稿保留在输入框中，不会作为回显消息写入对话：
+
+```text
+╭ Configure a model provider ──────────────────────────────────╮
+│ ▶ DeepSeek                  api.deepseek.com                  │
+│   OpenAI                    api.openai.com                    │
+│   OpenRouter                openrouter.ai                     │
+│   Custom OpenAI-compatible  Enter a name, API URL, and key   │
+│   Local Echo                No key · local UI testing only    │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+DeepSeek、OpenAI、OpenRouter 的名称、地址和常用密钥环境变量已经预设，选中后只编辑 API Key：
+
+```text
+╭ Connect to DeepSeek ──────────────────────────────────────────╮
+│ API URL  https://api.deepseek.com                             │
+│ ▶ API Key  ***************                                    │
+│ enter verify · esc back · ctrl+e advanced edit                │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+- 手工填写的密钥最终写入该 Provider 的 `api_key`；输入为空时会尝试读取预设环境变量
+  （DeepSeek 为 `DEEPSEEK_API_KEY`、OpenAI 为 `OPENAI_API_KEY`、OpenRouter 为
+  `OPENROUTER_API_KEY`），只持久化环境变量名，不把环境变量值复制进配置文件。
+- `enter` 使用当前密钥验证连接并拉取 `/models`，随后进入模型多选；确认模型前不会落盘。
+- `ctrl+e` 切换到名称、地址、密钥三框高级编辑；选择“自定义 OpenAI-compatible”也直接
+  进入三框表单。
+- 选择“本地 Echo”会显式保存 Echo Provider；它不是未配置状态下偷偷接收普通消息的默认模型。
+- 任一步按 `esc` 取消都不会写入 `~/.mini-opencode/config.json`。
+
+### 自定义供应商（三框表单 + 拉取模型）
 
 TUI 里 `/provider` 打开列表，最后一行 `＋ 新增提供商`（或直接 `/provider add` 不带参数）
 进入表单：
@@ -203,8 +237,9 @@ CLI 行模式没有浮层：`/provider add <name> <base_url> [model]` 直接保�
 给已有提供商换密钥：再跑一次 `/provider add`，**名字填一样的**，地址与密钥正常填——
 同名是就地更新，不会新增条目。
 
-启动时如果激活的提供商缺密钥：TUI 会以 `echo` 起界面，不再向转录添加启动提示。
-配置仍保留原激活项，可通过 `/provider add` 补上密钥或 `/provider` 切换提供商。
+启动时如果激活的提供商缺密钥：TUI 使用内部 `echo` runtime 保持界面可用，但会将原提供商
+标记为“未连接”，不会把错误提示写入转录，也不会把普通消息发送给 `echo`。按 Enter 或发送
+草稿会打开 `/provider add` 表单，并预填提供商名称与地址、聚焦密钥字段；配置仍保留原激活项。
 
 ## 配置格式与旧配置迁移
 

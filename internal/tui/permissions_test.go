@@ -19,7 +19,7 @@ func TestPermissionsCommand(t *testing.T) {
 	if m.state != statePermissions {
 		t.Fatal("bare /permissions did not open the picker")
 	}
-	if !strings.Contains(plainText(m.renderPermissionsMenu()), "替我审核") {
+	if !strings.Contains(plainText(m.renderPermissionsMenu()), "Auto review") {
 		t.Fatal("missing modes")
 	}
 	m = pressKey(m, key("esc"))

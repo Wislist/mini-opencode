@@ -50,7 +50,7 @@ func windowLabel(start, end, total int) string {
 	if start == 0 && end >= total {
 		return ""
 	}
-	return " · 显示 " + itoa(start+1) + "-" + itoa(end) + "/" + itoa(total)
+	return " · showing " + itoa(start+1) + "-" + itoa(end) + "/" + itoa(total)
 }
 
 // fitMenuRows trims optional rows so an overlay fits the terminal, keeping the
