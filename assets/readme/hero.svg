@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-labelledby="title desc">
+  <title id="title">mini-opencode local coding agent workflow</title>
+  <desc id="desc">A terminal-native coding agent that streams model responses through runtime hooks, permission gates, workspace tools, and durable local state.</desc>
+
+  <rect width="1200" height="480" fill="#101415"/>
+  <rect x="1" y="1" width="1198" height="478" rx="8" fill="none" stroke="#344044" stroke-width="2"/>
+  <path d="M0 74H1200" stroke="#2f383b" stroke-width="2"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <g transform="translate(38 26)">
+      <circle cx="9" cy="9" r="6" fill="#ff6b5f"/>
+      <circle cx="31" cy="9" r="6" fill="#f2c75c"/>
+      <circle cx="53" cy="9" r="6" fill="#75d58a"/>
+      <text x="80" y="17" fill="#9aa8aa" font-size="20" font-weight="600">LOCAL AGENT TERMINAL / GO + BUBBLE TEA</text>
+    </g>
+
+    <g transform="translate(48 130)">
+      <text x="0" y="0" fill="#f3f7f6" font-size="58" font-weight="750">mini-opencode</text>
+      <text x="2" y="48" fill="#c0cbca" font-size="26">本地 coding agent，驻留你的工作区。</text>
+      <text x="2" y="88" fill="#7f8f91" font-size="20">流式执行 · 权限门控 · 持久会话</text>
+
+      <g transform="translate(0 130)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+        <rect width="414" height="68" rx="8" fill="#171d1f" stroke="#435054" stroke-width="2"/>
+        <text x="22" y="43" fill="#75d58a" font-size="24" font-weight="700">$</text>
+        <text x="52" y="43" fill="#e7efed" font-size="24">mini-opencode</text>
+        <rect x="258" y="22" width="11" height="28" fill="#e6bb5e"/>
+      </g>
+
+      <g transform="translate(0 232)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+        <text x="0" y="0" fill="#92a0a2" font-size="19">workspace  ./your-project</text>
+        <text x="0" y="34" fill="#92a0a2" font-size="19">session    SQLite + FTS5</text>
+        <text x="0" y="68" fill="#92a0a2" font-size="19">memory     Markdown notes</text>
+      </g>
+    </g>
+
+    <g transform="translate(510 104)">
+      <text x="0" y="0" fill="#e6bb5e" font-size="21" font-weight="700">ONE TURN / 一轮执行</text>
+
+      <g transform="translate(0 26)">
+        <rect width="642" height="68" rx="8" fill="#172022" stroke="#435054" stroke-width="2"/>
+        <text x="20" y="43" fill="#75d58a" font-size="25" font-weight="700">01</text>
+        <text x="76" y="31" fill="#edf3f2" font-size="21" font-weight="650">PROMPT</text>
+        <text x="76" y="54" fill="#91a1a3" font-size="18">上下文、AGENTS.md 与 skills 进入请求</text>
+      </g>
+
+      <path d="M32 98V112" stroke="#e6bb5e" stroke-width="3"/>
+      <path d="M25 107L32 114L39 107" fill="none" stroke="#e6bb5e" stroke-width="3"/>
+
+      <g transform="translate(0 116)">
+        <rect width="642" height="68" rx="8" fill="#172022" stroke="#435054" stroke-width="2"/>
+        <text x="20" y="43" fill="#75d58a" font-size="25" font-weight="700">02</text>
+        <text x="76" y="31" fill="#edf3f2" font-size="21" font-weight="650">RUNTIME</text>
+        <text x="76" y="54" fill="#91a1a3" font-size="18">流式响应、turn loop、usage 与自动压缩</text>
+      </g>
+
+      <path d="M32 188V202" stroke="#e6bb5e" stroke-width="3"/>
+      <path d="M25 197L32 204L39 197" fill="none" stroke="#e6bb5e" stroke-width="3"/>
+
+      <g transform="translate(0 206)">
+        <rect width="642" height="68" rx="8" fill="#172022" stroke="#435054" stroke-width="2"/>
+        <text x="20" y="43" fill="#75d58a" font-size="25" font-weight="700">03</text>
+        <text x="76" y="31" fill="#edf3f2" font-size="21" font-weight="650">GUARD + TOOLS</text>
+        <text x="76" y="54" fill="#91a1a3" font-size="18">hooks、权限审批、read / edit / bash / MCP</text>
+      </g>
+
+      <path d="M32 278V292" stroke="#e6bb5e" stroke-width="3"/>
+      <path d="M25 287L32 294L39 287" fill="none" stroke="#e6bb5e" stroke-width="3"/>
+
+      <g transform="translate(0 296)">
+        <rect width="642" height="68" rx="8" fill="#151b1c" stroke="#435054" stroke-width="2"/>
+        <text x="20" y="43" fill="#75d58a" font-size="25" font-weight="700">04</text>
+        <text x="76" y="31" fill="#edf3f2" font-size="21" font-weight="650">DURABLE STATE</text>
+        <text x="76" y="54" fill="#91a1a3" font-size="18">sessions、snapshots、todos、memory 与 token</text>
+      </g>
+    </g>
+  </g>
+</svg>

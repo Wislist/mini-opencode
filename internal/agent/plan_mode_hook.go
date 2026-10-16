@@ -51,6 +51,13 @@ func (h *PlanModeHook) IsActive() bool {
 // drive itself forward while plan mode forbids the work it would do.
 func (h *PlanModeHook) BlocksTodoContinuation() bool { return h.IsActive() }
 
+func (h *PlanModeHook) turnBudgetPhase() string {
+	if h.IsActive() {
+		return "plan"
+	}
+	return "execution"
+}
+
 func (h *PlanModeHook) OnRunStart(_ context.Context) {}
 
 func (h *PlanModeHook) BeforeToolCall(_ context.Context, call ToolCall, def ToolDefinition) HookDecision {

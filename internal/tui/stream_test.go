@@ -166,3 +166,71 @@ func TestSpinnerKeepsTickingWhileRunning(t *testing.T) {
 		t.Fatal("spinner tick did not reschedule itself while running")
 	}
 }
+
+// TestSpinnerKeepsAnimatingWithCachedFooter guards the visible freeze where
+// the spinner model advanced but renderFooter kept returning its cached first
+// frame. Consecutive real ticks must change the rendered help bar without
+// requiring any unrelated input to invalidate the footer.
+func TestSpinnerKeepsAnimatingWithCachedFooter(t *testing.T) {
+	m := streamModel(t)
+	first := m.renderFooter()[len(m.renderFooter())-1]
+
+	_, next := m.Update(m.spinner.Tick())
+	if next == nil {
+		t.Fatal("first spinner tick did not schedule the next frame")
+	}
+	second := m.renderFooter()[len(m.renderFooter())-1]
+	if second == first {
+		t.Fatal("cached footer kept showing the first spinner frame")
+	}
+
+	msg := next()
+	_, next = m.Update(msg)
+	if next == nil {
+		t.Fatal("second spinner tick did not schedule the next frame")
+	}
+	third := m.renderFooter()[len(m.renderFooter())-1]
+	if third == second {
+		t.Fatal("spinner stopped changing after the first visible frame")
+	}
+}
+
+// TestSpinnerKeepsTickingBehindRunOverlays covers temporary UI states that
+// pause interaction without ending the active runtime. A tick arriving while
+// permission or plan approval is visible must still schedule the next tick;
+// otherwise the animation is permanently stopped when the overlay closes.
+func TestSpinnerKeepsTickingBehindRunOverlays(t *testing.T) {
+	for _, state := range []appState{statePermission, statePlanApproval} {
+		m := streamModel(t)
+		m.todos = "[>] run checks"
+		first := m.spinner.View()
+		m.state = state
+
+		_, next := m.Update(m.spinner.Tick())
+		if next == nil {
+			t.Fatalf("state %v stopped the spinner tick chain", state)
+		}
+		if got := m.spinner.View(); got == first {
+			t.Fatalf("state %v did not advance the spinner frame", state)
+		}
+	}
+}
+
+func TestSpinnerKeepsAnimatingAfterTodoPanelAppears(t *testing.T) {
+	m := streamModel(t)
+	m.Update(runtimeEventMsg{event: agent.Event{
+		Type:  agent.EventTodosChanged,
+		Todos: "[>] run checks",
+	}})
+	footer := m.renderFooter()
+	first := footer[len(footer)-1]
+
+	_, next := m.Update(m.spinner.Tick())
+	if next == nil {
+		t.Fatal("todo update stopped the spinner tick chain")
+	}
+	footer = m.renderFooter()
+	if got := footer[len(footer)-1]; got == first {
+		t.Fatal("spinner frame did not change after the todo panel appeared")
+	}
+}

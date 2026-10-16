@@ -24,16 +24,18 @@ const (
 	PromptAgenticFetch    PromptKind = "agentic_fetch_prompt"
 	PromptSummary         PromptKind = "summary"
 	PromptTitle           PromptKind = "title"
+	PromptCommandReview   PromptKind = "command_review"
 	defaultContextMaxSize            = 64 * 1024
 )
 
 var promptTemplateFiles = map[PromptKind]string{
-	PromptCoder:        "coder.md.tpl",
-	PromptTask:         "task.md.tpl",
-	PromptInitialize:   "initialize.md.tpl",
-	PromptAgenticFetch: "agentic_fetch_prompt.md.tpl",
-	PromptSummary:      "summary.md",
-	PromptTitle:        "title.md",
+	PromptCoder:         "coder.md.tpl",
+	PromptTask:          "task.md.tpl",
+	PromptInitialize:    "initialize.md.tpl",
+	PromptAgenticFetch:  "agentic_fetch_prompt.md.tpl",
+	PromptSummary:       "summary.md",
+	PromptTitle:         "title.md",
+	PromptCommandReview: "command_review.md.tpl",
 }
 
 var DefaultContextFileCandidates = []string{
@@ -137,6 +139,13 @@ func RenderPromptTemplate(kind PromptKind, ctx PromptContext) (string, error) {
 // given working directory. It is intended to be passed to Runtime.Compact.
 func SummarySystemPrompt(workingDir string) (string, error) {
 	return RenderPromptTemplate(PromptSummary, DefaultPromptContext(workingDir))
+}
+
+// CommandReviewSystemPrompt renders the prompt for the auto-review command
+// reviewer, which decides whether one shell command may run without asking the
+// user.
+func CommandReviewSystemPrompt(workingDir string) (string, error) {
+	return RenderPromptTemplate(PromptCommandReview, DefaultPromptContext(workingDir))
 }
 
 func DiscoverContextFiles(workingDir string, candidates []string) ([]ContextFile, error) {

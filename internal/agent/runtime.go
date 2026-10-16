@@ -747,8 +747,22 @@ func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error
 	r.hooks.OnRunStart(ctx)
 
 	chain := &todoChain{reader: r.todoReader, gated: r.todoChainGated()}
+	budgetPhase := r.hooks.turnBudgetPhase()
+	phaseTurns := 0
+	totalTurns := 0
 
-	for turn := 1; turn <= r.maxTurns; turn++ {
+	for {
+		currentPhase := r.hooks.turnBudgetPhase()
+		if currentPhase != budgetPhase {
+			budgetPhase = currentPhase
+			phaseTurns = 0
+		}
+		if phaseTurns >= r.maxTurns {
+			break
+		}
+		phaseTurns++
+		totalTurns++
+		turn := totalTurns
 		emit(Event{Type: EventTurnStarted, Turn: turn})
 
 		// Compact before the next request once the context approaches the
@@ -816,11 +830,15 @@ func (r *Runtime) Run(ctx context.Context, input string, emit func(Event)) error
 		}
 	}
 
+	detail := fmt.Sprintf("after %d turns", r.maxTurns)
+	if totalTurns != phaseTurns {
+		detail = fmt.Sprintf("after %d turns in the %s phase (%d total turns)", r.maxTurns, budgetPhase, totalTurns)
+	}
 	err := fmt.Errorf(
-		"turn budget exhausted after %d turns. Send a follow-up message to continue from here, "+
-			"raise agent.max_turns in .mini-opencode/config.json, or run /compact to shrink the context", r.maxTurns)
-	emit(Event{Type: EventBudgetExhausted, Turn: r.maxTurns, Error: err})
-	emit(Event{Type: EventRunFailed, Turn: r.maxTurns, Error: err})
+		"turn budget exhausted %s. Send a follow-up message to continue from here, "+
+			"raise agent.max_turns in .mini-opencode/config.json, or run /compact to shrink the context", detail)
+	emit(Event{Type: EventBudgetExhausted, Turn: totalTurns, Error: err})
+	emit(Event{Type: EventRunFailed, Turn: totalTurns, Error: err})
 	return err
 }
 

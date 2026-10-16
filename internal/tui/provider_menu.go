@@ -30,7 +30,7 @@ type providerMenuItem struct {
 // the two front ends cannot drift apart.
 func (m *Model) handleProvider(input string) (tea.Model, tea.Cmd) {
 	if m.state != stateIdle {
-		m.addBlock(errorStyle.Render("请等待当前操作结束，再切换 provider。"))
+		m.addBlock(errorStyle.Render("Wait for the current operation to finish before switching providers."))
 		m.refreshViewport()
 		return m, nil
 	}
@@ -56,7 +56,7 @@ func (m *Model) handleProvider(input string) (tea.Model, tea.Cmd) {
 	if cmd.Kind == config.ProviderCommandAdd {
 		configPath, err = m.configPath()
 		if err != nil {
-			m.addBlock(errorStyle.Render("定位全局 config.json 失败：" + err.Error()))
+			m.addBlock(errorStyle.Render("Failed to locate global config.json: " + err.Error()))
 			m.refreshViewport()
 			return m, nil
 		}
@@ -69,16 +69,24 @@ func (m *Model) handleProvider(input string) (tea.Model, tea.Cmd) {
 	}
 	switch cmd.Kind {
 	case config.ProviderCommandAdd:
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已写入全局 ~/.mini-opencode/config.json：provider %s → %s（type %s）",
+		m.addBlock(toolArrow.Render(fmt.Sprintf("Saved to global ~/.mini-opencode/config.json: provider %s → %s (type %s)",
 			m.cfg.Provider.Name, m.cfg.Provider.BaseURL, m.cfg.Provider.EffectiveType())))
-		m.addBlock(dimStyle.Render("如需密钥，用 /provider add 表单以同名更新，或配置 api_key_env。"))
+		m.addBlock(dimStyle.Render("To add a key, update the same provider with the /provider add form or configure api_key_env."))
 	default:
 		if !changed {
-			m.addBlock(dimStyle.Render("provider 未变：" + m.cfg.Provider.Name))
+			if m.cfg.NeedsProviderSetup() {
+				m.cfg.ProviderConfigured = true
+				m.cfg.ProviderConfigurationKnown = true
+				m.SetLLMStatus(LLMReady, "")
+				m.addBlock(toolArrow.Render("Enabled provider " + m.cfg.Provider.Name + " · current process only"))
+				m.refreshViewport()
+				return m, nil
+			}
+			m.addBlock(dimStyle.Render("Provider unchanged: " + m.cfg.Provider.Name))
 			m.refreshViewport()
 			return m, nil
 		}
-		m.addBlock(toolArrow.Render(fmt.Sprintf("已切换到 provider %s（原 %s）· 仅本次进程生效",
+		m.addBlock(toolArrow.Render(fmt.Sprintf("Switched to provider %s (previously %s) · current process only",
 			m.cfg.Provider.Name, previous)))
 	}
 	if changed {
@@ -98,7 +106,7 @@ func (m *Model) handleModel(input string) (tea.Model, tea.Cmd) {
 		return m.refreshModels()
 	}
 	if m.state != stateIdle {
-		m.addBlock(errorStyle.Render("请等待当前操作结束，再切换模型。"))
+		m.addBlock(errorStyle.Render("Wait for the current operation to finish before switching models."))
 		m.refreshViewport()
 		return m, nil
 	}
@@ -111,7 +119,7 @@ func (m *Model) handleModel(input string) (tea.Model, tea.Cmd) {
 	if cmd.Context {
 		path, pathErr := m.configPath()
 		if pathErr != nil {
-			m.addBlock(errorStyle.Render("定位全局 config.json 失败：" + pathErr.Error()))
+			m.addBlock(errorStyle.Render("Failed to locate global config.json: " + pathErr.Error()))
 			m.refreshViewport()
 			return m, nil
 		}
@@ -141,11 +149,11 @@ func (m *Model) handleModel(input string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !changed {
-		m.addBlock(dimStyle.Render(fmt.Sprintf("模型未变：%s（provider %s）", cmd.ID, m.cfg.Provider.Name)))
+		m.addBlock(dimStyle.Render(fmt.Sprintf("Model unchanged: %s (provider %s)", cmd.ID, m.cfg.Provider.Name)))
 		m.refreshViewport()
 		return m, nil
 	}
-	m.addBlock(toolArrow.Render(fmt.Sprintf("已切换模型 %s（原 %s）· 仅本次进程生效%s",
+	m.addBlock(toolArrow.Render(fmt.Sprintf("Switched to model %s (previously %s) · current process only%s",
 		cmd.ID, previous, m.applyFetchedWindow(m.cfg.Provider.Name))))
 	m.rebuildWithNotice()
 	return m, m.input.Focus()
@@ -173,8 +181,8 @@ func (m *Model) providerMenuItems() []providerMenuItem {
 		})
 	}
 	items = append(items, providerMenuItem{
-		name:    "＋ 新增提供商",
-		summary: "名称 / 地址 / 密钥，然后从该地址拉取模型并勾选",
+		name:    "+ Add provider",
+		summary: "Enter a name, URL, and key, then fetch and select models",
 		add:     true,
 	})
 	return items
@@ -195,7 +203,7 @@ func (m *Model) openModelMenu() {
 	m.modelMenu = m.cfg.Provider.CatalogModels()
 	if len(m.modelMenu) == 0 {
 		m.addBlock(dimStyle.Render(fmt.Sprintf(
-			"provider %s 没有配置模型：用 /model <id> 指定，或在全局 ~/.mini-opencode/config.json 的 models 里列出。",
+			"Provider %s has no configured models. Use /model <id>, or list models in global ~/.mini-opencode/config.json.",
 			m.cfg.Provider.Name)))
 		m.refreshViewport()
 		return
@@ -239,7 +247,7 @@ func (m *Model) renderProviderMenu() string {
 		}
 		lines = append(lines, fmt.Sprintf("%s%s %s  %s", marker, current, name, summary))
 	}
-	lines = append(lines, dimStyle.Render("切换仅本次进程生效 · /provider add 新增（依次填名称/地址/密钥）"))
+	lines = append(lines, dimStyle.Render("Switches affect the current process only · /provider add opens the name/URL/key form"))
 
 	return sessionBox.Width(w).Render(strings.Join(m.wrapMenuRows(lines, inner, 1+(end-start)), "\n"))
 }
@@ -252,7 +260,7 @@ func (m *Model) renderModelMenu() string {
 	start, end := visibleMenuWindow(len(m.modelMenu), m.modelCursor, m.menuItemBudget())
 	lines := []string{
 		keyLabel.Render("model:") + "  " +
-			dimStyle.Render(fmt.Sprintf("provider %s · ↑↓ select · enter apply · c 上下文 · esc cancel%s",
+			dimStyle.Render(fmt.Sprintf("provider %s · ↑↓ select · enter apply · c context · esc cancel%s",
 				m.cfg.Provider.Name, windowLabel(start, end, len(m.modelMenu)))),
 	}
 	for i := start; i < end; i++ {
@@ -269,7 +277,7 @@ func (m *Model) renderModelMenu() string {
 		}
 		lines = append(lines, fmt.Sprintf("%s%s %s", marker, current, name))
 	}
-	lines = append(lines, dimStyle.Render("切换仅本次进程生效 · /model <id> 直接指定 · /model refresh 从提供商重新拉取模型"))
+	lines = append(lines, dimStyle.Render("Switches affect the current process only · /model <id> selects directly · /model refresh fetches the provider catalog"))
 
 	return sessionBox.Width(w).Render(strings.Join(m.wrapMenuRows(lines, inner, 1+(end-start)), "\n"))
 }
@@ -328,6 +336,12 @@ func (m *Model) applyProviderSelection(item providerMenuItem) (tea.Model, tea.Cm
 	m.providerMenu = nil
 	m.invalidateFooter()
 	if item.active {
+		if m.cfg.NeedsProviderSetup() {
+			m.cfg.ProviderConfigured = true
+			m.cfg.ProviderConfigurationKnown = true
+			m.SetLLMStatus(LLMReady, "")
+			m.addBlock(toolArrow.Render("Enabled provider " + m.cfg.Provider.Name + " · current process only"))
+		}
 		m.refreshViewport()
 		return m, nil
 	}
@@ -337,7 +351,7 @@ func (m *Model) applyProviderSelection(item providerMenuItem) (tea.Model, tea.Cm
 		m.refreshViewport()
 		return m, nil
 	}
-	m.addBlock(toolArrow.Render(fmt.Sprintf("已切换到 provider %s · 仅本次进程生效", m.cfg.Provider.Name)))
+	m.addBlock(toolArrow.Render(fmt.Sprintf("Switched to provider %s · current process only", m.cfg.Provider.Name)))
 	m.rebuildWithNotice()
 	return m, m.input.Focus()
 }
@@ -396,7 +410,7 @@ func (m *Model) applyModelSelection(id string) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
-	m.addBlock(toolArrow.Render(fmt.Sprintf("已切换模型 %s（provider %s）· 仅本次进程生效%s",
+	m.addBlock(toolArrow.Render(fmt.Sprintf("Switched to model %s (provider %s) · current process only%s",
 		id, m.cfg.Provider.Name, m.applyFetchedWindow(m.cfg.Provider.Name))))
 	m.rebuildWithNotice()
 	return m, m.input.Focus()
@@ -428,10 +442,14 @@ func (m *Model) rebuildRuntime() error {
 	}
 	next, err := m.runtimeFactory(*m.cfg)
 	if err != nil {
+		m.SetLLMStatus(LLMUnavailable, err.Error())
 		return err
 	}
 	next.AdoptStateFrom(m.runtime)
 	m.SetRuntime(next)
+	m.cfg.ProviderConfigured = true
+	m.cfg.ProviderConfigurationKnown = true
+	m.SetLLMStatus(LLMReady, "")
 	return nil
 }
 

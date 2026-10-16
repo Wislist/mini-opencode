@@ -603,7 +603,7 @@ func TestApplyModelRefresh(t *testing.T) {
 		if res.Changed || res.Saved {
 			t.Fatalf("empty refresh reported a change: %+v", res)
 		}
-		if !strings.Contains(res.Message, "没有返回") {
+		if !strings.Contains(res.Message, "returned no models") {
 			t.Fatalf("message = %q", res.Message)
 		}
 	})
@@ -611,7 +611,7 @@ func TestApplyModelRefresh(t *testing.T) {
 	t.Run("nil fetcher is refused", func(t *testing.T) {
 		cfg, dir := loadConfig(t, twoProviders)
 		res := applyModelRefresh(&cfg, dir, nil)
-		if res.Changed || !strings.Contains(res.Message, "不可用") {
+		if res.Changed || !strings.Contains(res.Message, "unavailable") {
 			t.Fatalf("result = %+v", res)
 		}
 	})
@@ -635,7 +635,7 @@ func TestApplyModelRefreshStoresTheReportedWindow(t *testing.T) {
 	if cfg.Provider.ContextWindowSource() != config.ContextWindowSourceConfig {
 		t.Fatalf("source = %q", cfg.Provider.ContextWindowSource())
 	}
-	if !strings.Contains(res.Message, "窗口") {
+	if !strings.Contains(res.Message, "window") {
 		t.Fatalf("message should mention the window: %q", res.Message)
 	}
 	reloaded, err := config.LoadWorkspace(dir)
@@ -675,7 +675,7 @@ func TestPrintStatusMarksAGuessedWindow(t *testing.T) {
 		var out strings.Builder
 		printStatus(&out, statusInput{workingDir: dir, cfg: cfg})
 		got := out.String()
-		for _, want := range []string{"估值", "context_window"} {
+		for _, want := range []string{"estimated", "/model context"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("status %q should mention %q", got, want)
 			}
@@ -686,7 +686,7 @@ func TestPrintStatusMarksAGuessedWindow(t *testing.T) {
 		cfg, dir := loadConfig(t, twoProviders)
 		var out strings.Builder
 		printStatus(&out, statusInput{workingDir: dir, cfg: cfg})
-		if got := out.String(); strings.Contains(got, "估值") {
+		if got := out.String(); strings.Contains(got, "estimated") {
 			t.Fatalf("status marked a known model as a guess: %q", got)
 		}
 	})
@@ -698,7 +698,7 @@ func TestPrintStatusSkipsTheWindowForEcho(t *testing.T) {
 	var out strings.Builder
 	printStatus(&out, statusInput{workingDir: dir, cfg: cfg})
 	got := out.String()
-	for _, unwanted := range []string{"估值", "window:"} {
+	for _, unwanted := range []string{"estimated", "window:"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("echo status %q should not mention %q", got, unwanted)
 		}

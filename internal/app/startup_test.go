@@ -70,7 +70,7 @@ func TestMCPServerConfigsEdgeCases(t *testing.T) {
 }
 
 // A configured provider without a key must not lock the user out of the TUI:
-// the interface opens on echo without injecting a startup notice.
+// an internal echo runtime keeps the interface alive while chat remains gated.
 func TestStartRuntimeFallsBackToEchoWithoutKey(t *testing.T) {
 	cfg, dir := loadConfig(t, `{
 	  "providers": [{"name": "relay", "base_url": "https://relay.example.com/v1", "model": "gpt-4o"}]
@@ -89,6 +89,9 @@ func TestStartRuntimeFallsBackToEchoWithoutKey(t *testing.T) {
 	if cfg.Provider.Name != "relay" {
 		t.Fatalf("startup fallback rewrote the config: %q", cfg.Provider.Name)
 	}
+	if got := model.LLMStatus(); got != tui.LLMUnavailable {
+		t.Fatalf("LLM status = %v, want unavailable", got)
+	}
 }
 
 func TestStartRuntimeUsesTheConfiguredProvider(t *testing.T) {
@@ -103,6 +106,39 @@ func TestStartRuntimeUsesTheConfiguredProvider(t *testing.T) {
 	}
 	if rt == nil {
 		t.Fatal("no runtime returned")
+	}
+	if got := model.LLMStatus(); got != tui.LLMReady {
+		t.Fatalf("LLM status = %v, want ready", got)
+	}
+}
+
+func TestStartRuntimeMarksMissingGlobalProviderAsUnconfigured(t *testing.T) {
+	cfg, dir := loadConfig(t, "")
+	model := tui.New(&cfg, dir, "test")
+
+	rt, err := startRuntime(dir, &cfg, model, runtimeExtras{})
+	if err != nil {
+		t.Fatalf("startRuntime: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("no fallback runtime returned")
+	}
+	if got := model.LLMStatus(); got != tui.LLMUnconfigured {
+		t.Fatalf("LLM status = %v, want unconfigured", got)
+	}
+}
+
+func TestInstallTUIModelFetcherConfiguresProductionModel(t *testing.T) {
+	cfg := config.Default()
+	model := tui.New(&cfg, t.TempDir(), "test")
+	if model.ModelFetcherConfigured() {
+		t.Fatal("new TUI model unexpectedly has a catalog fetcher")
+	}
+
+	installTUIModelFetcher(model)
+
+	if !model.ModelFetcherConfigured() {
+		t.Fatal("production TUI did not install the model catalog fetcher")
 	}
 }
 

@@ -37,10 +37,10 @@ func TestPermissionsOpensOverlayNotTranscript(t *testing.T) {
 	if len(m.blocks) != before {
 		t.Fatalf("菜单被写进了对话区（blocks %d -> %d）", before, len(m.blocks))
 	}
-	// 菜单内容仍然可见，只是在覆盖层里。标签与 CLI 的 /permissions 输出保持一致
-	// （中文），三档都在。
+	// 菜单内容仍然可见，只是在覆盖层里。标签与 CLI 的 /permissions 输出保持一致，
+	// 三档都在。
 	menu := plainText(m.renderPermissionsMenu())
-	for _, want := range []string{"完全信任", "替我审核", "请求批准"} {
+	for _, want := range []string{"Full access", "Auto review", "Ask"} {
 		if !strings.Contains(menu, want) {
 			t.Fatalf("菜单缺少 %q:\n%s", want, menu)
 		}
@@ -152,7 +152,7 @@ func TestPermissionsMenuShowsCurrentMode(t *testing.T) {
 	m.handleInput("/permissions")
 
 	menu := plainText(m.renderPermissionsMenu())
-	if !strings.Contains(menu, "替我审核") {
+	if !strings.Contains(menu, "Auto review") {
 		t.Fatalf("菜单没有列出 auto-review 档:\n%s", menu)
 	}
 	// 当前项应有光标与当前标记

@@ -211,7 +211,7 @@ func (p ProviderConfig) Validate() error {
 		return err
 	}
 	if p.EffectiveType() == ProviderTypeOpenAICompatible && !IsAbsoluteHTTPURL(p.BaseURL) {
-		return fmt.Errorf("provider %q: base_url 必须是绝对 http(s) 地址，例如 https://relay.example.com/v1", p.Name)
+		return fmt.Errorf("provider %q: base_url must be an absolute http(s) URL, for example https://relay.example.com/v1", p.Name)
 	}
 	return nil
 }
@@ -297,6 +297,8 @@ func (c *Config) AddProvider(p ProviderConfig) error {
 		c.Providers[i] = merged
 		c.Provider = merged
 		c.ActiveProvider = merged.Name
+		c.ProviderConfigured = true
+		c.ProviderConfigurationKnown = true
 		return nil
 	}
 	if err := p.Validate(); err != nil {
@@ -305,6 +307,8 @@ func (c *Config) AddProvider(p ProviderConfig) error {
 	c.Providers = append(c.Providers, p)
 	c.Provider = p
 	c.ActiveProvider = p.Name
+	c.ProviderConfigured = true
+	c.ProviderConfigurationKnown = true
 	return nil
 }
 
@@ -469,7 +473,7 @@ func (p ProviderConfig) KeySource() string {
 		return "env:" + p.APIKeyEnv
 	}
 	if p.APIKeyEnv != "" {
-		return "env:" + p.APIKeyEnv + " (未设置)"
+		return "env:" + p.APIKeyEnv + " (not set)"
 	}
 	return "missing"
 }
@@ -483,19 +487,19 @@ func (p ProviderConfig) Summary() string {
 		parts = append(parts, "("+p.Name+")")
 	}
 	if p.EffectiveType() == ProviderTypeEcho {
-		return strings.Join(append(parts, "本地回显，无需密钥"), "  ")
+		return strings.Join(append(parts, "local echo, no key required"), "  ")
 	}
 	if p.BaseURL != "" {
 		parts = append(parts, p.BaseURL)
 	}
 	if p.Model != "" {
-		parts = append(parts, "模型 "+p.Model)
+		parts = append(parts, "model "+p.Model)
 	}
-	window := "窗口 " + FormatContextWindow(p.EffectiveContextWindow())
+	window := "window " + FormatContextWindow(p.EffectiveContextWindow())
 	if p.ContextWindowIsGuess() {
 		// The marker is the difference between "your model really is 8k" and
 		// "we do not know, tell us with context_window".
-		window += "（估）"
+		window += " (estimated)"
 	}
 	parts = append(parts, window, "key="+p.KeySource())
 	return strings.Join(parts, "  ")
@@ -550,7 +554,7 @@ func ParseProviderCommand(input string) (ProviderCommand, error) {
 			return ProviderCommand{}, fmt.Errorf("usage: /provider add <name> <base_url> [model]")
 		}
 		if !IsAbsoluteHTTPURL(args[1]) {
-			return ProviderCommand{}, fmt.Errorf("provider url %q 必须是绝对 http(s) 地址，例如 https://relay.example.com/v1", args[1])
+			return ProviderCommand{}, fmt.Errorf("provider URL %q must be an absolute http(s) URL, for example https://relay.example.com/v1", args[1])
 		}
 		cmd := ProviderCommand{Kind: ProviderCommandAdd, Name: args[0], URL: args[1]}
 		if len(args) == 3 {
@@ -590,7 +594,7 @@ func ParseModelCommand(input string) (ModelCommand, error) {
 			}
 			n, err := strconv.Atoi(value)
 			if err != nil || n <= 0 || n > int(^uint(0)>>1)/multiplier {
-				return ModelCommand{}, fmt.Errorf("上下文窗口须为正整数（支持 K/M），或 auto")
+				return ModelCommand{}, fmt.Errorf("context window must be a positive integer (K/M supported), or auto")
 			}
 			window = n * multiplier
 		}
@@ -627,12 +631,14 @@ func (c *Config) ApplyProviderCommand(cmd ProviderCommand, configPath string) (c
 		return !strings.EqualFold(previous, c.Provider.Name), false, nil
 	case ProviderCommandAdd:
 		prevProviders, prevActive, prevResolved := c.Providers, c.ActiveProvider, c.Provider
+		prevConfigured, prevKnown := c.ProviderConfigured, c.ProviderConfigurationKnown
 		if err := c.AddProvider(ProviderConfig{Name: cmd.Name, BaseURL: cmd.URL, Model: cmd.Model}); err != nil {
 			return false, false, err
 		}
 		if err := SaveProviderCatalog(configPath, *c); err != nil {
 			c.Providers, c.ActiveProvider, c.Provider = prevProviders, prevActive, prevResolved
-			return false, false, fmt.Errorf("写入 %s 失败：%w", configPath, err)
+			c.ProviderConfigured, c.ProviderConfigurationKnown = prevConfigured, prevKnown
+			return false, false, fmt.Errorf("failed to write %s: %w", configPath, err)
 		}
 		return true, true, nil
 	default:
@@ -648,7 +654,7 @@ func (c *Config) ApplyModelCommand(cmd ModelCommand) (changed bool, err error) {
 		return false, nil
 	}
 	if c.Provider.EffectiveType() == ProviderTypeEcho {
-		return false, fmt.Errorf("provider %q 是本地回显，没有可切换的模型", c.Provider.Name)
+		return false, fmt.Errorf("provider %q is local echo and has no models to switch", c.Provider.Name)
 	}
 	previous := c.Provider.Model
 	c.Provider.Model = cmd.ID
@@ -678,13 +684,13 @@ func IsAbsoluteHTTPURL(raw string) bool {
 // Querying never writes. A failed save leaves both resolved and catalog state intact.
 func (c *Config) ApplyModelContext(cmd ModelCommand, path string) (bool, string, error) {
 	if !cmd.Context {
-		return false, "", fmt.Errorf("不是上下文设置命令")
+		return false, "", fmt.Errorf("not a context-window command")
 	}
 	if cmd.Window == nil {
-		return false, fmt.Sprintf("provider %s：上下文窗口 %d tokens（%s）；/model context <tokens|1M|128K|auto>", c.Provider.Name, c.Provider.EffectiveContextWindow(), c.Provider.ContextWindowSource()), nil
+		return false, fmt.Sprintf("provider %s: context window %d tokens (%s); /model context <tokens|1M|128K|auto>", c.Provider.Name, c.Provider.EffectiveContextWindow(), c.Provider.ContextWindowSource()), nil
 	}
 	if *cmd.Window < 0 {
-		return false, "", fmt.Errorf("上下文窗口不能为负数")
+		return false, "", fmt.Errorf("context window cannot be negative")
 	}
 	next := *c
 	next.Providers = slices.Clone(c.Providers)
@@ -693,8 +699,8 @@ func (c *Config) ApplyModelContext(cmd ModelCommand, path string) (bool, string,
 		return false, "", err
 	}
 	if err := SaveProviderCatalog(path, next); err != nil {
-		return false, "", fmt.Errorf("保存上下文窗口失败：%w", err)
+		return false, "", fmt.Errorf("failed to save context window: %w", err)
 	}
 	*c = next
-	return changed, fmt.Sprintf("已保存 provider %s 的上下文窗口：%d tokens（%s）；该提供商所有模型共用，refresh 可更新窗口", c.Provider.Name, c.Provider.EffectiveContextWindow(), c.Provider.ContextWindowSource()), nil
+	return changed, fmt.Sprintf("saved context window for provider %s: %d tokens (%s); all models on this provider share it, and refresh may update it", c.Provider.Name, c.Provider.EffectiveContextWindow(), c.Provider.ContextWindowSource()), nil
 }

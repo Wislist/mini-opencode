@@ -15,6 +15,23 @@ func TestLoadMissingConfigUsesEchoDefault(t *testing.T) {
 	if cfg.Provider.Name != "echo" {
 		t.Fatalf("provider = %q", cfg.Provider.Name)
 	}
+	if cfg.ProviderConfigured {
+		t.Fatal("missing config must keep echo as an internal fallback, not mark it as user-configured")
+	}
+}
+
+func TestLoadExplicitEchoCountsAsConfigured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"echo","type":"echo"}],"active_provider":"echo"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.ProviderConfigured {
+		t.Fatal("an explicitly configured echo provider must not be presented as first-run setup")
+	}
 }
 
 func TestLoadAppliesDisplayNameDefaults(t *testing.T) {
@@ -195,5 +212,22 @@ func TestLoadNormalizesAllowedRoots(t *testing.T) {
 	}
 	if len(cfg.Workspace.AllowedRoots) != 1 {
 		t.Fatalf("allowed roots = %#v, want 1", cfg.Workspace.AllowedRoots)
+	}
+}
+
+func TestLoadNormalizesPermissionAllowCommands(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeJSONFile(t, path, `{"permissions":{"mode":"auto-review","allow_commands":[["cargo","test"],["cargo",""],[],["   "]]}}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Permissions.AllowCommands) != 1 {
+		t.Fatalf("allow_commands = %v, want only the complete rule", cfg.Permissions.AllowCommands)
+	}
+	if got := cfg.Permissions.AllowCommands[0]; len(got) != 2 || got[0] != "cargo" || got[1] != "test" {
+		t.Fatalf("allow_commands[0] = %v", got)
 	}
 }

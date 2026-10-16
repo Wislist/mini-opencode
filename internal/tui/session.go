@@ -106,13 +106,10 @@ func (m *Model) handleListSessions() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	store := m.sessions
-	go func() {
+	return m, func() tea.Msg {
 		metas, err := store.List()
-		m.program.Send(sessionsLoadedMsg{metas: metas, err: err})
-	}()
-	m.addBlock(dimStyle.Render("loading sessions..."))
-	m.refreshViewport()
-	return m, nil
+		return sessionsLoadedMsg{metas: metas, err: err}
+	}
 }
 
 // switchSessionCmd returns a command that loads the selected session and

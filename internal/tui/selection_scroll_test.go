@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestSelectionStaysOnTranscriptWhenScrolled(t *testing.T) {
@@ -58,6 +60,98 @@ func TestSelectionEdgeScrollContinuesAndStops(t *testing.T) {
 			m.Update(stale)
 			if m.viewport.YOffset() != stopped {
 				t.Fatal("scroll continued after release")
+			}
+		})
+	}
+}
+
+func TestSelectionEdgeScrollExtendsVisibleHighlightWithoutTearing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		direction int
+		startAt   int
+		pointerAt func(*Model) int
+	}{
+		{
+			name:      "down",
+			direction: 1,
+			startAt:   0,
+			pointerAt: func(m *Model) int {
+				_, bottom := m.selectionViewportBounds()
+				return bottom
+			},
+		},
+		{
+			name:      "up",
+			direction: -1,
+			startAt:   12,
+			pointerAt: func(m *Model) int {
+				top, _ := m.selectionViewportBounds()
+				return top
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := selectionTestModel(t)
+			m.viewport.SetYOffset(tc.startAt)
+			top, bottom := m.selectionViewportBounds()
+			anchorRow := top + 1
+			if tc.direction < 0 {
+				anchorRow = bottom - 1
+			}
+
+			m.Update(mouseClick(2, anchorRow))
+			_, cmd := m.Update(mouseMotion(20, tc.pointerAt(m)))
+			if cmd == nil {
+				t.Fatal("edge drag did not schedule scrolling")
+			}
+
+			for range 3 {
+				msg := cmd()
+				_, cmd = m.Update(msg)
+				if cmd == nil {
+					t.Fatal("stationary edge pointer stopped before reaching the boundary")
+				}
+			}
+
+			wantEndRow := m.selectionPoint(m.selection.pointer).row
+			if m.selection.end.row != wantEndRow {
+				t.Fatalf("selection endpoint stayed at row %d after scrolling; want %d", m.selection.end.row, wantEndRow)
+			}
+
+			saved := m.selection
+			m.selection = selection{}
+			plain := m.renderFrame()
+			m.selection = saved
+			highlighted := m.renderFrame()
+
+			plainLines := strings.Split(plain, "\n")
+			highlightedLines := strings.Split(highlighted, "\n")
+			if len(highlightedLines) != len(plainLines) {
+				t.Fatalf("highlight changed frame height: %d -> %d", len(plainLines), len(highlightedLines))
+			}
+			if ansi.Strip(highlighted) != ansi.Strip(plain) {
+				t.Fatal("highlight changed visible frame text")
+			}
+			for i := range plainLines {
+				if got, want := ansi.StringWidth(highlightedLines[i]), ansi.StringWidth(plainLines[i]); got != want {
+					t.Fatalf("row %d width changed: %d -> %d", i, want, got)
+				}
+			}
+			for _, border := range []string{"╭", "╮", "╰", "╯"} {
+				if got, want := strings.Count(ansi.Strip(highlighted), border), strings.Count(ansi.Strip(plain), border); got != want {
+					t.Fatalf("border %q count changed: %d -> %d", border, want, got)
+				}
+			}
+
+			highlightedRows := 0
+			for row := top; row <= bottom && row < len(highlightedLines); row++ {
+				if strings.Contains(highlightedLines[row], ansi.SGR(ansi.AttrReverse)) {
+					highlightedRows++
+				}
+			}
+			if highlightedRows < 3 {
+				t.Fatalf("long selection highlighted only %d visible row(s)", highlightedRows)
 			}
 		})
 	}

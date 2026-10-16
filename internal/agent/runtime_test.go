@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -58,6 +59,24 @@ func (t uppercaseTool) Run(ctx context.Context, toolInput ToolInput) (ToolOutput
 		return ToolOutput{}, err
 	}
 	return ToolOutput{Content: strings.ToUpper(args.Text)}, nil
+}
+
+type leavePlanModeTool struct {
+	hook *PlanModeHook
+}
+
+func (t leavePlanModeTool) Definition() ToolDefinition {
+	return ToolDefinition{
+		Name:        "leave_plan_mode",
+		Description: "Simulate an approved plan submission.",
+		InputSchema: map[string]any{"type": "object"},
+		Behavior:    ToolBehavior{ReadOnly: true},
+	}
+}
+
+func (t leavePlanModeTool) Run(context.Context, ToolInput) (ToolOutput, error) {
+	t.hook.SetActive(false)
+	return ToolOutput{Content: "plan approved"}, nil
 }
 
 func TestRuntimeExecutesToolAndContinues(t *testing.T) {
@@ -860,6 +879,39 @@ func TestRuntimeReportsTurnBudgetExhaustion(t *testing.T) {
 	}
 	if !budget {
 		t.Fatal("EventBudgetExhausted was not emitted")
+	}
+}
+
+func TestRuntimeResetsTurnBudgetAfterLeavingPlanMode(t *testing.T) {
+	planHook := NewPlanModeHook(true)
+	provider := &scriptedProvider{responses: []AssistantResponse{
+		{
+			Content: "submit plan",
+			ToolCalls: []ToolCall{{
+				ID:        "leave-plan",
+				Name:      "leave_plan_mode",
+				Arguments: json.RawMessage(`{}`),
+			}},
+		},
+		{Content: "implementation finished"},
+	}}
+	rt := NewRuntime(provider,
+		WithMaxTurns(1),
+		WithHook(planHook),
+		WithTool(leavePlanModeTool{hook: planHook}),
+	)
+
+	var turns []int
+	err := rt.Run(context.Background(), "plan then implement", func(event Event) {
+		if event.Type == EventTurnStarted {
+			turns = append(turns, event.Turn)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v, want a fresh budget after plan approval", err)
+	}
+	if got, want := turns, []int{1, 2}; !slices.Equal(got, want) {
+		t.Fatalf("turns = %v, want %v", got, want)
 	}
 }
 

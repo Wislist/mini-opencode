@@ -146,6 +146,35 @@ func TestPlanPromptRendersAndCapsLongPlans(t *testing.T) {
 	}
 }
 
+func TestPlanApprovalMessageShowsFullPlanBeforeAsking(t *testing.T) {
+	m := newTestModel(t)
+	plan := "## Why\n\nThe command review is rule based.\n\n## Final step\n\nVerify the complete explanation is visible."
+
+	m.Update(planApprovalMsg{plan: plan, resp: make(chan planDecision, 1)})
+
+	if m.state != statePlanApproval {
+		t.Fatalf("state = %v, want plan approval", m.state)
+	}
+	transcript := plainText(strings.Join(m.blocks, "\n"))
+	if !strings.Contains(transcript, "The command review is rule based.") ||
+		!strings.Contains(transcript, "Verify the complete explanation is visible.") {
+		t.Fatalf("full plan was not added before approval: %q", transcript)
+	}
+	frame := plainText(m.renderFrame())
+	if !strings.Contains(frame, "Verify the complete explanation is visible.") {
+		t.Fatalf("plan was not visible in the approval frame: %q", frame)
+	}
+
+	// The completion event records only the verdict; it must not duplicate the
+	// plan that was already shown before the user made that decision.
+	m.mode = ModeCode
+	m.onPlanSubmitted(agent.Event{Type: agent.EventPlanSubmitted, Plan: plan})
+	transcript = plainText(strings.Join(m.blocks, "\n"))
+	if got := strings.Count(transcript, "Verify the complete explanation is visible."); got != 1 {
+		t.Fatalf("plan rendered %d times, want once: %q", got, transcript)
+	}
+}
+
 func TestPlanApprovalTurnsOffPlanMode(t *testing.T) {
 	m := newTestModel(t)
 	hook := agent.NewPlanModeHook(true)

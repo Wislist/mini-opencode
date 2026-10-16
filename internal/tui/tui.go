@@ -39,6 +39,9 @@ const (
 	stateProviderMenu
 	// stateModelMenu is the /model picker for the active provider.
 	stateModelMenu
+	// stateProviderSetup is the first-run picker for known providers, a custom
+	// OpenAI-compatible endpoint, or the local echo implementation.
+	stateProviderSetup
 	// stateProviderForm is the three-field add form (name / endpoint / key).
 	stateProviderForm
 	// stateModelsFetching is the wait between submitting the form and the
@@ -115,6 +118,18 @@ type planApprovalMsg struct {
 
 type RuntimeFactory func(cfg config.Config) (*agent.Runtime, error)
 
+// LLMStatus describes whether the configured provider can serve chat turns.
+// Ready is the zero value so models assembled directly in tests and embedded
+// callers keep their historical behavior unless startup explicitly says
+// otherwise.
+type LLMStatus uint8
+
+const (
+	LLMReady LLMStatus = iota
+	LLMUnconfigured
+	LLMUnavailable
+)
+
 type Model struct {
 	viewport viewport.Model
 	input    textarea.Model
@@ -126,6 +141,8 @@ type Model struct {
 	cfg        *config.Config
 	workingDir string
 	version    string
+	llmStatus  LLMStatus
+	llmDetail  string
 
 	// terminal records how the host terminal delivers wheel input so scroll
 	// steps can be tuned per terminal.
@@ -166,14 +183,24 @@ type Model struct {
 	selection                 selection
 	selectionScrollGeneration uint64
 	selectionScrollPending    bool
+	// inputSelectAll is the whole-question selection used by Command+A on
+	// macOS and Ctrl+A on Windows. textarea has no public selection API, so the
+	// TUI owns this one all-or-nothing state and applies replacement semantics
+	// before forwarding edits to the widget.
+	inputSelectAll bool
+	// inputSelectAllHighlighted is a structured render marker for tests. ANSI
+	// styling may be stripped when output is not attached to a TTY.
+	inputSelectAllHighlighted bool
 	// permissionsCursor is the highlighted row in the /permissions picker.
 	permissionsCursor int
 	// providerMenu/modelMenu are snapshots taken when the matching picker
 	// opens; the cursors index into them.
-	providerMenu   []providerMenuItem
-	providerCursor int
-	modelMenu      []string
-	modelCursor    int
+	providerMenu        []providerMenuItem
+	providerCursor      int
+	modelMenu           []string
+	modelCursor         int
+	providerSetup       []providerSetupOption
+	providerSetupCursor int
 	// providerForm / pendingAdd / modelSelect back the add-provider flow; see
 	// provider_form.go. pendingAdd is nil unless that flow is in progress.
 	providerForm       providerFormState
@@ -290,6 +317,9 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 	ti.SetStyles(promptTextareaStyles())
 	// The input is a prompt box, not a document editor: Enter sends, so the
 	// newline key is Ctrl+J / Alt+Enter (see handleKey).
+	ti.DynamicHeight = true
+	ti.MinHeight = 1
+	ti.MaxHeight = maxInputBarLines
 	ti.SetHeight(1)
 	ti.Focus()
 
@@ -297,6 +327,10 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = spinnerStyle
 
+	llmStatus := LLMReady
+	if cfg.NeedsProviderSetup() {
+		llmStatus = LLMUnconfigured
+	}
 	return &Model{
 		viewport: vp,
 		input:    ti,
@@ -313,6 +347,7 @@ func New(cfg *config.Config, workingDir, ver string) *Model {
 		permissionMode: cfg.Permissions.Mode,
 		workingDir:     workingDir,
 		version:        ver,
+		llmStatus:      llmStatus,
 		mode:           ModeCode,
 		terminal:       detectTerminalProfile(),
 	}
@@ -323,12 +358,28 @@ func (m *Model) Runtime() *agent.Runtime             { return m.runtime }
 func (m *Model) SetProgram(p *tea.Program)           { m.program = p }
 func (m *Model) SetRuntimeFactory(rf RuntimeFactory) { m.runtimeFactory = rf }
 
+// SetLLMStatus updates the user-facing connection state without adding a
+// transcript message. Startup failures and first-run setup belong to the app
+// chrome, not to the conversation sent back to a provider later.
+func (m *Model) SetLLMStatus(status LLMStatus, detail string) {
+	m.llmStatus = status
+	m.llmDetail = strings.TrimSpace(detail)
+	m.invalidateFooter()
+}
+
+// LLMStatus returns the current user-facing provider connection state.
+func (m *Model) LLMStatus() LLMStatus { return m.llmStatus }
+
 // SetModelFetcher installs the provider model-list request used by the
 // add-provider form and /model refresh. It is injected rather than called
 // directly so the UI layer owns no network code and stays testable.
 func (m *Model) SetModelFetcher(fetcher func(ctx context.Context, baseURL, apiKey string) ([]agent.ModelInfo, error)) {
 	m.modelFetcher = fetcher
 }
+
+// ModelFetcherConfigured reports whether provider setup can verify credentials
+// and load a model catalog. The assembly layer uses it as a startup invariant.
+func (m *Model) ModelFetcherConfigured() bool     { return m.modelFetcher != nil }
 func (m *Model) SetCompactor(c Compactor)         { m.compactor = c }
 func (m *Model) SetSessionStore(s *session.Store) { m.sessions = s }
 
@@ -500,8 +551,10 @@ func (m *Model) SessionAllowedTools() []string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	m.addBlock(dimStyle.Render("welcome to mini-opencode") + "\n" +
-		dimStyle.Render("type / for commands, or just start typing."))
+	if m.llmStatus == LLMReady {
+		m.addBlock(dimStyle.Render("welcome to mini-opencode") + "\n" +
+			dimStyle.Render("type / for commands, or just start typing."))
+	}
 	m.gitStatus = collectGitStatus(m.workingDir)
 	if m.sessions != nil && m.currentSession == nil {
 		m.currentSession = m.sessions.Create("new session")
@@ -561,7 +614,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return model, cmd
 
 	case spinner.TickMsg:
-		if m.state == stateRunning || m.state == stateCompacting {
+		// Permission and plan approval are temporary overlays on an active run.
+		// Keep the tick chain alive behind them so the spinner resumes immediately
+		// when the overlay closes instead of freezing on its last frame.
+		if m.state == stateRunning || m.state == stateCompacting ||
+			m.state == statePermission || m.state == statePlanApproval {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			cmds = append(cmds, cmd)
@@ -693,6 +750,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 
 	case planApprovalMsg:
+		// The tool-call block intentionally truncates long arguments, so publish
+		// the complete plan as transcript content before asking for a verdict.
+		// This keeps the approval prompt honest: the user can scroll through the
+		// full explanation before allowing implementation to start.
+		if plan := strings.TrimSpace(msg.plan); plan != "" {
+			m.addBlock(m.renderAssistantMessage(plan))
+		}
 		m.pendingPlan = &msg
 		m.state = statePlanApproval
 		m.refreshViewport()
@@ -712,7 +776,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmds = append(cmds, cmd)
 
 	if m.state == stateIdle || m.state == stateRunning {
+		if _, ok := msg.(tea.PasteMsg); ok && m.inputSelectAll {
+			m.clearSelectedInput()
+		}
 		m.input, cmd = m.input.Update(msg)
+		// Paste arrives as its own message rather than a key press. Resize after
+		// the textarea inserts it so long or multiline clipboard content becomes
+		// visible immediately; maxInputLines still caps the frame safely.
+		m.syncInputHeight()
+		cmds = append(cmds, cmd)
+	} else if m.state == stateProviderForm {
+		// Bubble Tea v2 delivers bracketed paste as tea.PasteMsg, and the
+		// textinput ctrl+v command returns its clipboard contents later as a
+		// separate message. Key presses take the state-specific path above;
+		// forward the remaining messages here so the focused provider field can
+		// actually receive pasted names, endpoints, and API keys.
+		field := m.providerFormField(m.providerForm.focus)
+		*field, cmd = field.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 	return m, tea.Batch(cmds...)

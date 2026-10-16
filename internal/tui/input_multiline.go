@@ -1,10 +1,28 @@
 package tui
 
-import (
-	"strings"
+// isInputSelectAllKey keeps the platform conventions separate. Ctrl+A remains
+// textarea's line-start command on macOS and Linux; Windows uses it for select
+// all, while macOS terminals report Command+A as super+a when the enhanced
+// keyboard protocol is available.
+func isInputSelectAllKey(key, goos string) bool {
+	switch goos {
+	case "darwin":
+		return key == "super+a"
+	case "windows":
+		return key == "ctrl+a"
+	default:
+		return false
+	}
+}
 
-	"charm.land/lipgloss/v2"
-)
+func (m *Model) cancelInputSelectAll() {
+	m.inputSelectAll = false
+}
+
+func (m *Model) clearSelectedInput() {
+	m.input.Reset()
+	m.cancelInputSelectAll()
+}
 
 // Multiline prompt input.
 //
@@ -43,7 +61,17 @@ func (m *Model) insertNewline() {
 // the bottom of the screen, which is the overflow that used to make boxes look
 // detached. A minimum of one row keeps the prompt usable even then.
 func (m *Model) syncInputHeight() {
-	m.input.SetHeight(clampInt(m.inputLineCount(), 1, m.maxInputLines()))
+	// Let textarea use its own wrapping model to calculate both height and the
+	// internal viewport offset. Growing a one-row textarea after a paste with a
+	// standalone SetHeight leaves its viewport parked on the final row, which
+	// produces a tall box containing one visible line and blank space.
+	m.input.DynamicHeight = true
+	m.input.MinHeight = 1
+	m.input.MaxHeight = m.maxInputLines()
+	// SetWidth triggers textarea's dynamic-height recalculation without changing
+	// the value or caret. The prompt textarea has no internal border or prompt,
+	// so Width is also the correct width to feed back here.
+	m.input.SetWidth(max(1, m.input.Width()))
 }
 
 // maxInputLines is how many content rows the prompt box may use right now,
@@ -65,40 +93,13 @@ func (m *Model) maxInputLines() int {
 	return min(available, maxInputBarLines)
 }
 
-// inputLineCount is the number of visual lines the current value occupies,
-// taking wrapping into account so a long single line also grows the box.
-func (m *Model) inputLineCount() int {
-	value := m.input.Value()
-	if value == "" {
-		return 1
-	}
-	width := m.input.Width()
-	if width <= 0 {
-		// Width is not known yet (before the first resize); count explicit
-		// newlines only rather than guessing a wrap width.
-		return strings.Count(value, "\n") + 1
-	}
-	total := 0
-	for _, line := range strings.Split(value, "\n") {
-		w := lipgloss.Width(line)
-		if w <= 0 {
-			total++
-			continue
-		}
-		// A line occupying exactly `width` cells wraps to the next row once the
-		// caret sits at the end, which is why the ceiling division is used.
-		total += (w + width - 1) / width
-	}
-	return max(1, total)
-}
-
 // inputBarHeight is how many rows the prompt box occupies, including its
 // border rows when it has any.
 func (m *Model) inputBarHeight() int {
 	if m.height > 0 && m.height < minHeightForBorderedInput {
 		return 1 // the compact single-line form has no border
 	}
-	return clampInt(m.inputLineCount(), 1, m.maxInputLines()) + 2
+	return clampInt(m.input.Height(), 1, m.maxInputLines()) + 2
 }
 
 // borderedInputFits reports whether the terminal is tall enough for the prompt

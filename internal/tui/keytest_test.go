@@ -49,6 +49,14 @@ func key(name string) tea.KeyMsg {
 		return tea.KeyPressMsg{Code: 'd', Mod: uv.ModCtrl}
 	case "ctrl+t":
 		return tea.KeyPressMsg{Code: 't', Mod: uv.ModCtrl}
+	case "ctrl+a":
+		return tea.KeyPressMsg{Code: 'a', Mod: uv.ModCtrl}
+	case "super+a":
+		return tea.KeyPressMsg{Code: 'a', Mod: uv.ModSuper}
+	case "backspace":
+		return tea.KeyPressMsg{Code: tea.KeyBackspace}
+	case "delete":
+		return tea.KeyPressMsg{Code: uv.KeyDelete}
 	}
 	// A single rune key, e.g. "y" or "/".
 	runes := []rune(name)

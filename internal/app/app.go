@@ -25,7 +25,7 @@ import (
 // tree always has a meaningful version even without the Makefile. `make build`
 // overrides it with a git-derived value (see the Makefile), which is why the
 // binary — not the source — carries the commit-specific version.
-var version = "0.5.1"
+var version = "0.5.3"
 
 // SetVersion overrides the reported version. The main package calls it from
 // linker-injected values; tests may call it directly.
@@ -302,7 +302,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			return nil
 		default:
 			if strings.HasPrefix(input, "/") {
-				fmt.Fprintf(out, "unknown command: %s（输入 / 会列出可用命令）\n", input)
+				fmt.Fprintf(out, "unknown command: %s (type / to list available commands)\n", input)
 				continue
 			}
 			if err := runtime.Run(ctx, input, renderEvent(out)); err != nil {
@@ -351,7 +351,7 @@ func printStatus(out io.Writer, in statusInput) {
 		// A made-up window is the difference between "your model really is 8k"
 		// and "we do not know": say so where the number is shown, and say how to
 		// fix it.
-		fmt.Fprintf(out, "  ⚠ 窗口 %s 是估值（模型 %q 不在内置表里）：用 /model context <tokens> 设置 context_window，或跑 /model refresh 从 /models 读取\n",
+		fmt.Fprintf(out, "  ⚠ Window %s is estimated because model %q is not in the built-in catalog. Set it with /model context <tokens>, or run /model refresh to read it from /models.\n",
 			config.FormatContextWindow(in.cfg.Provider.EffectiveContextWindow()), in.cfg.Provider.Model)
 	}
 	if in.session != nil {
@@ -598,6 +598,7 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 			return nil, err
 		}
 	}
+	configureCommandReview(permissions, cfg, workingDir)
 	promptContext := prompt.DefaultPromptContext(workingDir)
 	contextFiles, err := prompt.DiscoverContextFiles(workingDir, nil)
 	if err != nil {
@@ -738,7 +739,7 @@ func printMCPStatus(out io.Writer, manager *mcp.Manager) {
 
 // confirmTool prompts on the terminal for tool approval. Answers:
 //
-//	y / yes / 允许   allow this call once
+//	y / yes          allow this call once
 //	a / always       allow this tool for the rest of the session
 //	anything else    deny
 //
@@ -757,9 +758,9 @@ func confirmTool(scanner *bufio.Scanner, out io.Writer, sessionAllowed map[strin
 			return false
 		}
 		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
-		case "y", "yes", "允许":
+		case "y", "yes":
 			return true
-		case "a", "always", "总是":
+		case "a", "always":
 			sessionAllowed[call.Name] = true
 			fmt.Fprintf(out, "[%s allowed for this session]\n", call.Name)
 			return true
@@ -826,7 +827,7 @@ func replaceRuntimeKeepingState(current *agent.Runtime, build func() (*agent.Run
 // clear next step.
 func reportRebuildFailure(out io.Writer, err error) {
 	fmt.Fprintf(out, "error: %v\n", err)
-	fmt.Fprintln(out, "[the previous provider is still serving; fix this with /provider add (同一 provider 名补上密钥) 或换一个提供商]")
+	fmt.Fprintln(out, "[the previous provider is still serving; use /provider add to update the same provider with a key, or switch providers]")
 }
 
 // cliPlanApprover prompts on the terminal for a plan verdict and clears plan
@@ -839,7 +840,7 @@ func cliPlanApprover(scanner *bufio.Scanner, out io.Writer, hook *agent.PlanMode
 			return false, ""
 		}
 		answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
-		if answer == "y" || answer == "yes" || answer == "允许" {
+		if answer == "y" || answer == "yes" {
 			if hook != nil {
 				hook.SetActive(false)
 			}

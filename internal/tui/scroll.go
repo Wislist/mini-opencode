@@ -97,6 +97,9 @@ func (m *Model) scrollLines(n int) {
 // mouse action so text selection and clicks keep their default terminal
 // behavior.
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// A pointer interaction leaves keyboard selection mode. Transcript drag
+	// selection remains independent and is handled below.
+	m.cancelInputSelectAll()
 	// Bubble Tea v2 delivers each mouse phase as its own message type, so the
 	// selection handler is driven from the concrete events rather than from an
 	// action field.

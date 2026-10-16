@@ -17,9 +17,9 @@ var permissionMenuItems = []struct {
 	label string
 	help  string
 }{
-	{agent.PermissionModeFullAccess, "完全信任", "跳过逐次审批（需确认）"},
-	{agent.PermissionModeAutoReview, "替我审核", "保守本地规则，不确定时询问"},
-	{agent.PermissionModeAsk, "请求批准", "每次危险操作都询问"},
+	{agent.PermissionModeFullAccess, "Full access", "skip per-call approval (confirmation required)"},
+	{agent.PermissionModeAutoReview, "Auto review", "allow build/test and other low-risk commands; ask when uncertain"},
+	{agent.PermissionModeAsk, "Ask", "ask before every dangerous operation"},
 }
 
 // openPermissionsMenu enters the picker with the cursor on the active mode, so
@@ -72,7 +72,7 @@ func (m *Model) renderPermissionsMenu() string {
 		}
 		lines = append(lines, fmt.Sprintf("%s%s %-10s %s", marker, current, label, help))
 	}
-	lines = append(lines, dimStyle.Render("仅本次进程生效；不是操作系统沙箱。"))
+	lines = append(lines, dimStyle.Render("Applies to this process only; this is not an OS sandbox."))
 
 	// Wrap and then flatten into physical rows before trimming.
 	//
@@ -101,10 +101,10 @@ func (m *Model) fitPermissionMenuRows(lines []string) []string {
 func (m *Model) renderPermissionsConfirm() string {
 	w := boxWidth(m)
 	inner := max(1, w-4)
-	content := keyLabel.Render("完全信任确认") + "\n" +
-		dimStyle.Render("将跳过逐次审批并解除工具层工作区限制；可访问当前用户有权限的文件和网络。") + "\n" +
-		dimStyle.Render("安全 Hook、plan 模式和先读后写仍然有效。") + "\n" +
-		permAsk.Render("enter 确认 · esc 取消")
+	content := keyLabel.Render("Confirm full access") + "\n" +
+		dimStyle.Render("This skips per-call approval and removes tool-level workspace limits. Tools may access files and networks available to the current user.") + "\n" +
+		dimStyle.Render("Safety hooks, plan mode, and read-before-write still apply.") + "\n" +
+		permAsk.Render("enter confirm · esc cancel")
 	return permBox.Width(w).Render(wordWrap(content, inner))
 }
 
