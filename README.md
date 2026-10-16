@@ -7,11 +7,9 @@
 <div align="center">
   <b style="font-size: 1.15em;">Go 实现的本地 coding agent 终端：Bubble Tea TUI、流式 agent runtime、受控工具执行、持久会话与可扩展 provider</b><br /><br />
   <a href="https://www.npmjs.com/package/@wislist/mini-opencode"><img alt="npm version" src="https://img.shields.io/npm/v/@wislist/mini-opencode" /></a>
-  <a href="https://www.npmjs.com/package/@wislist/mini-opencode"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@wislist/mini-opencode" /></a>
   <a href="https://github.com/Wislist/mini-opencode/actions/workflows/makefile.yml"><img alt="CI" src="https://github.com/Wislist/mini-opencode/actions/workflows/makefile.yml/badge.svg" /></a>
   <a href="https://go.dev/"><img alt="Go 1.25.8" src="https://img.shields.io/badge/Go-1.25.8-00ADD8?logo=go&amp;logoColor=white" /></a>
   <a href="https://github.com/charmbracelet/bubbletea"><img alt="Bubble Tea v2.0.8" src="https://img.shields.io/badge/Bubble%20Tea-v2.0.8-874BFD" /></a>
-  <a href="https://github.com/Wislist/mini-opencode/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Wislist/mini-opencode" /></a>
   <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
   <img alt="Platforms: macOS and Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-4d6bfe" />
 </div>
