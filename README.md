@@ -4,13 +4,15 @@
   <img src="assets/readme/hero.svg" alt="mini-opencode：从提示、运行时、权限门控与工具执行，到本地持久化状态的 coding agent 工作流" width="100%">
 </p>
 
-<p align="center">
-  Go 实现的本地 coding agent 终端：Bubble Tea TUI、流式 agent runtime、受控工具执行、持久会话与可扩展 provider。
-</p>
-
-<p align="center">
-  macOS · Windows 10/11 · Go 1.25 · MIT
-</p>
+<div align="center">
+  <b style="font-size: 1.15em;">Go 实现的本地 coding agent 终端：Bubble Tea TUI、流式 agent runtime、受控工具执行、持久会话与可扩展 provider</b><br /><br />
+  <a href="https://www.npmjs.com/package/@wislist/mini-opencode"><img alt="npm version" src="https://img.shields.io/npm/v/@wislist/mini-opencode" /></a>
+  <a href="https://www.npmjs.com/package/@wislist/mini-opencode"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@wislist/mini-opencode" /></a>
+  <a href="https://github.com/Wislist/mini-opencode/actions/workflows/makefile.yml"><img alt="CI" src="https://github.com/Wislist/mini-opencode/actions/workflows/makefile.yml/badge.svg" /></a>
+  <a href="https://github.com/Wislist/mini-opencode/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Wislist/mini-opencode" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
+  <img alt="Platforms: macOS and Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-4d6bfe" />
+</div>
 
 `mini-opencode` 同时提供交互式 TUI 和行模式 CLI。终端输入时进入 TUI；stdin 来自管道时使用同一套 runtime 执行行模式任务。项目独立实现，不依赖仓库中的历史 agent 实现。
 
