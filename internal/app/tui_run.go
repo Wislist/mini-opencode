@@ -178,6 +178,7 @@ func newTUIRuntime(workingDir string, cfg config.Config, model *tui.Model, extra
 	if err != nil {
 		return nil, err
 	}
+	configureCommandReview(permissions, cfg, workingDir)
 	promptContext := prompt.DefaultPromptContext(workingDir)
 	contextFiles, err := prompt.DiscoverContextFiles(workingDir, nil)
 	if err != nil {

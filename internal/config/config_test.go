@@ -214,3 +214,20 @@ func TestLoadNormalizesAllowedRoots(t *testing.T) {
 		t.Fatalf("allowed roots = %#v, want 1", cfg.Workspace.AllowedRoots)
 	}
 }
+
+func TestLoadNormalizesPermissionAllowCommands(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeJSONFile(t, path, `{"permissions":{"mode":"auto-review","allow_commands":[["cargo","test"],["cargo",""],[],["   "]]}}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Permissions.AllowCommands) != 1 {
+		t.Fatalf("allow_commands = %v, want only the complete rule", cfg.Permissions.AllowCommands)
+	}
+	if got := cfg.Permissions.AllowCommands[0]; len(got) != 2 || got[0] != "cargo" || got[1] != "test" {
+		t.Fatalf("allow_commands[0] = %v", got)
+	}
+}

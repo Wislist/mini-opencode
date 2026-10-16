@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -34,7 +35,7 @@ func TestLoadPermissionModes(t *testing.T) {
 				t.Fatal(err)
 			}
 			loaded, err := Load(path)
-			if err != nil || loaded.Permissions != cfg.Permissions {
+			if err != nil || !reflect.DeepEqual(loaded.Permissions, cfg.Permissions) {
 				t.Fatal("round trip", loaded.Permissions, err)
 			}
 		})

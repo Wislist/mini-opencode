@@ -175,12 +175,33 @@ discoverable.
 
 - `ask`（请求批准，默认）：沿用现有策略；超出允许根目录、命中旧命令黑名单直接拒绝，
   `Dangerous` / `RequiresConfirmation` 工具请求人工审批；只读工具照常免审批。
-- `auto-review`（替我审核）：在默认策略之上，用保守本地规则批准工作区 / allowed roots 内的
-  `write`、`edit`，以及精确的 `pwd`、`/bin/pwd`、`/bin/ls`。不接受额外参数、命令拼接、重定向、
-  命令替换、项目脚本或 Git 配置执行；显式后台运行仍需审批。无法判定的需审批操作仍提示用户。不是独立模型审核器。
+- `auto-review`（替我审核）：在默认策略之上，用本地规则批准工作区 / allowed roots 内的
+  `write`、`edit`，以及一组 shell 命令。shell 命令先做分词：出现任何 shell 元字符
+  （`;` `|` `&` `>` `<` `$( )` 反引号、通配符、subshell、换行、转义）或引号不闭合即需审批；
+  程序必须是 PATH 上的裸名字（或受信的 `/bin/pwd`、`/bin/ls`）。本地规则放行两类命令：
+  1. **只读命令**：`pwd`、`ls`、`git` 只读子命令（`status`/`log`/`diff`/`show`/`blame`/
+     `rev-parse`/`ls-files`/`describe`/`shortlog`，以及只读形式的 `branch`/`remote`）、
+     `go` 的 `version`/`env`/`list`/`doc`（`go env -w` 除外）；Windows 另放行
+     `Get-Location`/`Get-ChildItem`/`dir`。
+  2. **构建 / 测试入口的前缀规则**（内置 + `permissions.allow_commands`）：`go build`/
+     `test`/`run`/`vet`/`fmt`、`make`、`npm test`/`run`/`ci`、`pytest`、`python -m pytest`。
+     前缀之后的参数仍受限：绝对路径、`..` 穿越、Windows 盘符路径，以及 `go` 的
+     `-exec`/`-toolexec` 都不匹配，所以借道写不到工作区外。刻意不含 `go generate`
+     （执行源码里的指令）、裸 `npm`（可 publish）、裸解释器与 `npx`。
+  3. **模型审核**（`permissions.auto_review_model`，默认开启）：本地规则判不了时，把这条
+     命令交给当前 provider 做一次独立判定（20s 超时、不带工具）。只有模型显式返回
+     `{"allow": true}` 才转为放行；拒绝、回复不合法、调用失败或超时都退回人工审批
+     （fail-closed）。设 `auto_review_model: false` 回到纯本地规则、零网络调用。
+  `git -c`/`--config`/`--exec-path`/`--output`、`git branch -D`、`git remote add` 等仍需审批。
+  显式后台运行仍需审批。**模型审核不是沙箱**，它只是一次建议；SafetyHook 仍然在先。
 - `full-access`（完全信任）：主 agent 的文件工具可访问当前账户有权限的任意路径，
   跳过逐次审批和旧命令黑名单。SafetyHook / PlanModeHook / LoopGuardHook、先读后写保持有效。
   普通 `git push` 不再受旧黑名单阻止，但强推、硬重置等仍由 SafetyHook 阻止。
+
+`permissions.allow_commands` 是追加前缀，例如 `[["cargo","test"],["terraform","plan"]]`。
+它只能**加宽** auto-review，且只在全局 `~/.mini-opencode/config.json` 生效 —— 项目
+config 里的 `allow_commands` / `auto_review_model` 会被忽略，否则 clone 下来的仓库就能
+给自己的构建脚本开白名单。项目 config 仍可收窄 `permissions.mode`。
 
 `/permissions` 显示三种选项。`/permissions full-access` 只显示警告；必须再输入
 `/permissions full-access confirm` 才启用。其余模式直接切换。重复选择当前模式是无副作用操作，

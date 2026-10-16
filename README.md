@@ -152,7 +152,7 @@ go run ./cmd/mini-opencode
 | 模式 | 行为 |
 | --- | --- |
 | `ask` | 默认；危险或需确认的调用交给用户审批。 |
-| `auto-review` | 只自动批准保守的本地文件写入和精确只读目录命令；不是模型审核器。 |
+| `auto-review` | 自动批准保守的本地文件写入、只读命令与构建/测试入口（`go build`/`test`/`run`、`make`、`npm test` 等），并可让模型复核本地规则判不了的命令（`permissions.auto_review_model`，默认开启，失败一律退回人工审批）。 |
 | `full-access` | 需显式确认；跳过逐次审批与工作区路径限制，但仍受 hooks、plan 模式、先读后写和当前系统账户权限约束。 |
 
 这些是应用层审批机制，**不是操作系统沙箱**。Shell 与外部 MCP server 仍以当前账户权限运行。

@@ -598,6 +598,7 @@ func newRuntime(workingDir string, cfg config.Config, scanner *bufio.Scanner, ou
 			return nil, err
 		}
 	}
+	configureCommandReview(permissions, cfg, workingDir)
 	promptContext := prompt.DefaultPromptContext(workingDir)
 	contextFiles, err := prompt.DiscoverContextFiles(workingDir, nil)
 	if err != nil {

@@ -90,11 +90,16 @@ func (m *Model) renderFrame() string {
 // height instead of relying on a fixed subtraction that leaves stale rows.
 //
 // The result is memoized against footerDirty. View() runs on every message —
-// including each spinner tick — and rebuilding the todo panel, input bar and
-// help bar plus measuring every section with lipgloss was measurable work per
-// frame, even though none of those sections change between ticks.
+// including each spinner tick — and rebuilding the todo panel and input bar
+// plus measuring every section with lipgloss was measurable work per frame.
+// The final help-bar row is the exception while running: its spinner glyph is
+// refreshed in place so the animation remains visible without rebuilding the
+// rest of the footer.
 func (m *Model) renderFooter() []string {
 	if !m.footerDirty && m.cachedFooter != nil {
+		if (m.state == stateRunning || m.state == stateCompacting) && len(m.cachedFooter) > 0 {
+			m.cachedFooter[len(m.cachedFooter)-1] = m.renderHelpBar()
+		}
 		return m.cachedFooter
 	}
 	sections := m.buildFooter()
@@ -380,13 +385,26 @@ func (m *Model) renderContextSegment() string {
 }
 
 func (m *Model) renderInputBar() string {
+	m.inputSelectAllHighlighted = false
+	inputView := m.input.View()
+	if m.inputSelectAll && m.input.Value() != "" {
+		// textarea does not expose a selectable range. Strip its caret styling
+		// and paint the visible input rows as one selected region; hidden rows
+		// remain selected by state and are still replaced by the next edit.
+		plainLines := strings.Split(ansi.Strip(inputView), "\n")
+		for i, line := range plainLines {
+			plainLines[i] = selectionStyle.Render(line)
+		}
+		inputView = strings.Join(plainLines, "\n")
+		m.inputSelectAllHighlighted = true
+	}
 	// A terminal too short for the border falls back to a single row, so the
 	// box cannot take more rows than exist and push the frame off screen.
 	if !m.borderedInputFits() {
-		return m.promptStyleM().Render("❯ ") + m.input.View()
+		return m.promptStyleM().Render("❯ ") + inputView
 	}
 	// border(2) + padding(2) sit on top of Width, so subtract 2 to fit.
-	return m.inputBorderStyle().Width(boxWidth(m)).Render(m.promptStyleM().Render("❯") + " " + m.input.View())
+	return m.inputBorderStyle().Width(boxWidth(m)).Render(m.promptStyleM().Render("❯") + " " + inputView)
 }
 
 func (m *Model) renderPermissionPrompt() string {

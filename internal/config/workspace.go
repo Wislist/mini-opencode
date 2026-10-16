@@ -111,6 +111,7 @@ func LoadWorkspace(workDir string) (Config, error) {
 		delete(projectRaw, "provider")
 		delete(projectRaw, "providers")
 		delete(projectRaw, "active_provider")
+		stripProjectPermissionEscalation(projectRaw)
 		globalMode, restrictPermissions := configuredPermissionMode(globalRaw)
 		deepMerge(globalRaw, projectRaw)
 		if projectMode := permissionMode(globalRaw); restrictPermissions && permissionRank(projectMode) > permissionRank(globalMode) {
@@ -279,6 +280,32 @@ func setPermissionMode(raw map[string]json.RawMessage, mode agent.PermissionMode
 		Mode agent.PermissionMode `json:"mode"`
 	}{Mode: mode})
 	raw["permissions"] = data
+}
+
+// stripProjectPermissionEscalation removes the permission fields only the
+// global config may own. allow_commands and auto_review_model can only widen
+// what runs without approval, so a cloned repository could otherwise whitelist
+// its own build scripts. The mode is handled separately: a project config may
+// still tighten it, just never relax it.
+func stripProjectPermissionEscalation(raw map[string]json.RawMessage) {
+	data, ok := raw["permissions"]
+	if !ok {
+		return
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || fields == nil {
+		return
+	}
+	if _, ok := fields["allow_commands"]; !ok {
+		if _, ok := fields["auto_review_model"]; !ok {
+			return
+		}
+	}
+	delete(fields, "allow_commands")
+	delete(fields, "auto_review_model")
+	if merged, err := json.Marshal(fields); err == nil {
+		raw["permissions"] = merged
+	}
 }
 
 func permissionRank(mode agent.PermissionMode) int {

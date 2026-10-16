@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"runtime"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -82,6 +83,41 @@ func (m *Model) handlePlanApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return m.handleIdleKeyForOS(msg, runtime.GOOS)
+}
+
+func (m *Model) handleIdleKeyForOS(msg tea.KeyMsg, goos string) (tea.Model, tea.Cmd) {
+	if isInputSelectAllKey(msg.String(), goos) {
+		m.inputSelectAll = m.input.Value() != ""
+		return m, nil
+	}
+
+	if m.inputSelectAll {
+		switch msg.String() {
+		case "esc":
+			m.cancelInputSelectAll()
+			return m, nil
+		case "backspace", "delete", "ctrl+h":
+			m.clearSelectedInput()
+			m.syncInputHeight()
+			m.updateCommandMenu()
+			return m, nil
+		case "ctrl+j", "shift+enter", "alt+enter":
+			m.clearSelectedInput()
+			m.insertNewline()
+			m.updateCommandMenu()
+			return m, nil
+		default:
+			if msg.Key().Text != "" {
+				m.clearSelectedInput()
+			} else {
+				// Navigation and application shortcuts collapse the synthetic
+				// selection before keeping their existing behavior.
+				m.cancelInputSelectAll()
+			}
+		}
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "ctrl+d":
 		m.state = stateQuitting
@@ -97,6 +133,7 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.commandMenuOpen() && len(m.commandFiltered) > 0 {
 			selected := m.commandMenuSelect()
 			m.input.Reset()
+			m.cancelInputSelectAll()
 			m.syncInputHeight()
 			m.commandFiltered = nil
 			m.commandCursor = 0
@@ -112,6 +149,7 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.Reset()
+		m.cancelInputSelectAll()
 		m.syncInputHeight()
 		m.commandFiltered = nil
 		m.commandCursor = 0
@@ -150,6 +188,7 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.commandMenuOpen() {
 			m.input.Reset()
+			m.cancelInputSelectAll()
 			m.commandFiltered = nil
 			m.commandCursor = 0
 			return m, nil
@@ -168,6 +207,10 @@ func (m *Model) handleIdleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	// Ordinary typing can soft-wrap just like an explicit newline. Recompute
+	// the prompt height after the widget accepts the key so wrapped text does
+	// not stay hidden inside a one-row textarea.
+	m.syncInputHeight()
 	m.updateCommandMenu()
 	return m, cmd
 }

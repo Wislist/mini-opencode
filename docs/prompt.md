@@ -103,6 +103,7 @@ Today's date: ...
 | `title.md` | 会话首轮后生成短标题（替换 `new session` 占位） |
 | `task.md.tpl` | `task` 工具的只读子 agent system prompt |
 | `agentic_fetch_prompt.md.tpl` | 供 `web_fetch` / `web_search` 抓取内容后的分析流程 |
+| `command_review.md.tpl` | `auto-review` 模式下模型复核单条 shell 命令（返回 `{"allow":bool,"reason":...}`） |
 
 ## Skills
 

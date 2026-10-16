@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/wislist/mini-opencode/internal/config"
 )
@@ -114,6 +116,119 @@ func TestInputBarHeightIsBounded(t *testing.T) {
 
 	if got := lineCount(m.renderInputBar()); got > maxInputBarLines+2 {
 		t.Fatalf("输入框高 %d 行，超过上限 %d（含边框）", got, maxInputBarLines+2)
+	}
+}
+
+func TestPastedConversationGrowsInputWithoutTearingFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		height  int
+		content string
+	}{
+		{
+			name:    "wrapped single line",
+			height:  24,
+			content: strings.Repeat("long pasted conversation ", 20),
+		},
+		{
+			name:    "multiple lines",
+			height:  24,
+			content: strings.Repeat("first paragraph\nsecond paragraph\n", 6),
+		},
+		{
+			name:    "short terminal",
+			height:  8,
+			content: strings.Repeat("pasted content that wraps\n", 12),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := inputTestModel(t)
+			model, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: tc.height})
+			m = model.(*Model)
+
+			model, _ = m.Update(tea.PasteMsg{Content: tc.content})
+			m = model.(*Model)
+			input := m.renderInputBar()
+			if got := lineCount(input); got <= 3 {
+				t.Fatalf("pasted conversation still renders as one content row: %d total rows", got)
+			}
+			if got := lineCount(input); got > m.maxInputLines()+2 {
+				t.Fatalf("input grew past its budget: %d rows, max %d", got, m.maxInputLines()+2)
+			}
+
+			frame := m.renderFrame()
+			if got := lineCount(frame); got > tc.height {
+				t.Fatalf("frame is %d rows in a %d-row terminal", got, tc.height)
+			}
+			for _, pair := range [][2]string{{"╭", "╰"}, {"╮", "╯"}} {
+				if opens, closes := strings.Count(frame, pair[0]), strings.Count(frame, pair[1]); opens != closes {
+					t.Fatalf("box corners are unbalanced for %q/%q: %d/%d", pair[0], pair[1], opens, closes)
+				}
+			}
+		})
+	}
+}
+
+func TestPasteGrowthRepositionsInternalViewport(t *testing.T) {
+	m := inputTestModel(t)
+	rows := make([]string, 10)
+	for i := range rows {
+		rows[i] = fmt.Sprintf("copied conversation row %02d", i)
+	}
+
+	model, _ := m.Update(tea.PasteMsg{Content: strings.Join(rows, "\n")})
+	m = model.(*Model)
+
+	if got, want := m.input.Height(), maxInputBarLines; got != want {
+		t.Fatalf("textarea height = %d, want %d", got, want)
+	}
+	if got, want := m.input.ScrollYOffset(), len(rows)-maxInputBarLines; got != want {
+		t.Fatalf("textarea stayed scrolled to the last row: offset = %d, want %d", got, want)
+	}
+
+	visible := ansi.Strip(m.renderInputBar())
+	for _, row := range rows[len(rows)-maxInputBarLines:] {
+		if !strings.Contains(visible, row) {
+			t.Fatalf("grown textarea does not show %q: %q", row, visible)
+		}
+	}
+
+	frame := m.renderFrame()
+	if got := lineCount(frame); got > m.height {
+		t.Fatalf("frame is %d rows in a %d-row terminal", got, m.height)
+	}
+	for _, pair := range [][2]string{{"╭", "╰"}, {"╮", "╯"}} {
+		if opens, closes := strings.Count(frame, pair[0]), strings.Count(frame, pair[1]); opens != closes {
+			t.Fatalf("box corners are unbalanced for %q/%q: %d/%d", pair[0], pair[1], opens, closes)
+		}
+	}
+}
+
+func TestSoftWrappedPasteRepositionsInternalViewport(t *testing.T) {
+	m := inputTestModel(t)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 42, Height: 24})
+	m = model.(*Model)
+
+	content := strings.Repeat("工作区外只读内容 read grep ", 20)
+	model, _ = m.Update(tea.PasteMsg{Content: content})
+	m = model.(*Model)
+
+	wrappedLines := m.input.LineInfo().Height
+	if wrappedLines <= m.input.Height() {
+		t.Fatalf("test content did not exceed the visible textarea: wrapped=%d visible=%d", wrappedLines, m.input.Height())
+	}
+	if got, want := m.input.ScrollYOffset(), wrappedLines-m.input.Height(); got != want {
+		t.Fatalf("soft-wrapped paste stayed on one row: offset = %d, want %d", got, want)
+	}
+
+	frame := m.renderFrame()
+	if got := lineCount(frame); got > m.height {
+		t.Fatalf("frame is %d rows in a %d-row terminal", got, m.height)
+	}
+	for _, pair := range [][2]string{{"╭", "╰"}, {"╮", "╯"}} {
+		if opens, closes := strings.Count(frame, pair[0]), strings.Count(frame, pair[1]); opens != closes {
+			t.Fatalf("box corners are unbalanced for %q/%q: %d/%d", pair[0], pair[1], opens, closes)
+		}
 	}
 }
 

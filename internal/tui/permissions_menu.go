@@ -18,7 +18,7 @@ var permissionMenuItems = []struct {
 	help  string
 }{
 	{agent.PermissionModeFullAccess, "Full access", "skip per-call approval (confirmation required)"},
-	{agent.PermissionModeAutoReview, "Auto review", "allow low-risk local operations; ask when uncertain"},
+	{agent.PermissionModeAutoReview, "Auto review", "allow build/test and other low-risk commands; ask when uncertain"},
 	{agent.PermissionModeAsk, "Ask", "ask before every dangerous operation"},
 }
 

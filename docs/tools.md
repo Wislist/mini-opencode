@@ -11,6 +11,31 @@ and working-directory-relative paths outside allowed roots. It does not disable
 read-before-write, snapshots, plan approval or safety hooks. It is not an OS
 sandbox and cannot constrain arbitrary shell code or an external MCP server.
 
+`auto-review` additionally approves workspace-scoped `write`/`edit` and shell
+commands the local rules can vouch for. Only bare program names (or the trusted
+`/bin/pwd`, `/bin/ls`) qualify, and the command is tokenized and rejected on any
+shell metacharacter, so it cannot chain, pipe, redirect, substitute, glob or
+escape. Locally approved: `pwd`, `ls`, read-only `git`
+(`status`/`log`/`diff`/`show`/`blame`/`rev-parse`/`ls-files`/`describe`/
+`shortlog`, plus listing-only `branch`/`remote`), `go`
+`version`/`env`/`list`/`doc`, and token prefixes from the build/test
+entry points — `go build`/`test`/`run`/`vet`/`fmt`, `make`, `npm
+test`/`run`/`ci`, `pytest`, `python -m pytest` — plus anything the user adds in
+`permissions.allow_commands`. Arguments after a prefix are still vetted:
+absolute paths, `..` traversal, Windows drive paths and the go tool's
+`-exec`/`-toolexec` hooks never match, so a prefix cannot reach outside the
+workspace. Deliberately excluded: `go generate`, a bare `npm`, bare
+interpreters and `npx`.
+
+Anything the local rules cannot classify goes to the model reviewer when
+`permissions.auto_review_model` is enabled (the default). It is a single
+provider call with no tools and a 20s timeout, and only an explicit
+`{"allow": true}` reply turns the confirmation into an approval; a refusal, an
+unparseable reply, an error or a timeout all fall back to asking the user. Set
+the flag to `false` for purely rule-based, offline behaviour. The reviewer is a
+second opinion, never a sandbox: safety hooks still run first, and `ask` mode
+never consults it.
+
 `internal/agent/tools` contains the coding tool set. The CLI and TUI register
 these plus any tools advertised by configured MCP servers (there is no `/tools`
 command: the agent's own tool list is what the model sees, and the names come

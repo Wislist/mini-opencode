@@ -307,3 +307,52 @@ func TestWorkspaceConfigDefaultsAndSaveFailure(t *testing.T) {
 		t.Fatal("expected path error")
 	}
 }
+
+func TestLoadWorkspaceProjectCannotWidenAutoReview(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(home, ".mini-opencode", "config.json"), `{"permissions":{"mode":"auto-review"}}`)
+	writeJSONFile(t, filepath.Join(project, ".mini-opencode", "config.json"),
+		`{"permissions":{"mode":"auto-review","allow_commands":[["sh","-c"]],"auto_review_model":false}}`)
+
+	cfg, err := LoadWorkspace(project)
+	if err != nil {
+		t.Fatalf("LoadWorkspace() error = %v", err)
+	}
+	if len(cfg.Permissions.AllowCommands) != 0 {
+		t.Fatalf("project widened the auto-review allowlist: %v", cfg.Permissions.AllowCommands)
+	}
+	if cfg.Permissions.AutoReviewModel != nil {
+		t.Fatal("project disabled the model reviewer")
+	}
+	if !cfg.Permissions.AutoReviewModelEnabled() {
+		t.Fatal("model reviewer should default to enabled")
+	}
+}
+
+func TestLoadWorkspaceKeepsGlobalAutoReviewSettings(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(home, ".mini-opencode", "config.json"),
+		`{"permissions":{"mode":"auto-review","allow_commands":[["cargo","test"]],"auto_review_model":false}}`)
+	writeJSONFile(t, filepath.Join(project, ".mini-opencode", "config.json"), `{"agent":{"max_turns":7}}`)
+
+	cfg, err := LoadWorkspace(project)
+	if err != nil {
+		t.Fatalf("LoadWorkspace() error = %v", err)
+	}
+	if len(cfg.Permissions.AllowCommands) != 1 || cfg.Permissions.AllowCommands[0][0] != "cargo" {
+		t.Fatalf("global allowlist was dropped: %v", cfg.Permissions.AllowCommands)
+	}
+	if cfg.Permissions.AutoReviewModelEnabled() {
+		t.Fatal("global auto_review_model=false was ignored")
+	}
+}

@@ -48,6 +48,21 @@ type Config struct {
 
 type PermissionsConfig struct {
 	Mode agent.PermissionMode `json:"mode"`
+	// AllowCommands adds token prefixes that auto-review may approve without
+	// asking (for example ["cargo", "test"]). Rules are matched against the
+	// tokenized command, so a rule can never match a chained, piped or
+	// redirected command.
+	AllowCommands [][]string `json:"allow_commands,omitempty"`
+	// AutoReviewModel toggles the model-backed reviewer inside auto-review
+	// mode. A nil value means enabled; set it to false to keep auto-review
+	// purely rule-based and offline.
+	AutoReviewModel *bool `json:"auto_review_model,omitempty"`
+}
+
+// AutoReviewModelEnabled reports whether auto-review may ask a model about the
+// shell commands its local rules cannot classify. It defaults to enabled.
+func (c PermissionsConfig) AutoReviewModelEnabled() bool {
+	return c.AutoReviewModel == nil || *c.AutoReviewModel
 }
 
 // MemoryConfig controls optional semantic retrieval over durable Markdown
@@ -322,6 +337,7 @@ func normalizeConfig(cfg *Config) error {
 		return err
 	}
 	cfg.Permissions.Mode = mode
+	cfg.Permissions.AllowCommands = agent.NormalizeCommandAllowlist(cfg.Permissions.AllowCommands)
 	if err := cfg.normalizeProviders(); err != nil {
 		return err
 	}

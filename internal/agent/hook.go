@@ -54,6 +54,13 @@ type Hook interface {
 // always wins over Deny when both appear.
 type HookChain []Hook
 
+// turnBudgetPhaseProvider lets a hook expose a user-controlled phase boundary
+// to the runtime's turn budget. It stays outside Hook because most hooks do not
+// affect the lifetime of a run.
+type turnBudgetPhaseProvider interface {
+	turnBudgetPhase() string
+}
+
 func (c HookChain) OnRunStart(ctx context.Context) {
 	for _, h := range c {
 		h.OnRunStart(ctx)
@@ -85,6 +92,23 @@ func (c HookChain) AfterTurn(ctx context.Context, turn int, history []Message) H
 		}
 	}
 	return Continue()
+}
+
+func (c HookChain) turnBudgetPhase() string {
+	var phases []string
+	for _, hook := range c {
+		provider, ok := hook.(turnBudgetPhaseProvider)
+		if !ok {
+			continue
+		}
+		if phase := provider.turnBudgetPhase(); phase != "" {
+			phases = append(phases, phase)
+		}
+	}
+	if len(phases) == 0 {
+		return "run"
+	}
+	return strings.Join(phases, "+")
 }
 
 // --- SafetyHook -----------------------------------------------------------
