@@ -32,6 +32,11 @@ mini-opencode
 
 安装时请保留 optional dependencies。当前原生包覆盖 macOS 与 Windows 10/11 的 arm64、x64。
 
+有新版本发布时，启动器会先提示并询问是否更新（`Update now? [y/N]`）；选 `y` 会用你当初
+使用的包管理器执行全局安装，然后启动新版本。检查每天最多一次、只在交互终端进行，选
+`No` 之后同一版本不再追问。设 `MINI_OPENCODE_NO_UPDATE_CHECK=1`（或
+`NO_UPDATE_NOTIFIER=1`）可完全关闭；`CI` 环境下自动跳过。
+
 ### 从源码运行
 
 macOS：

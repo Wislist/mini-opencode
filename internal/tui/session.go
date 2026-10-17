@@ -67,6 +67,18 @@ func (m *Model) handleSessionListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// clearInterruptState drops a pause that belongs to another conversation.
+// runUnwinding is deliberately not touched: the previous Run is still returning
+// and its runtimeDoneMsg must be allowed to settle.
+func (m *Model) clearInterruptState() {
+	m.paused = false
+	m.pendingInput = ""
+	m.interruptedPartial = ""
+	m.interruptedResponse = false
+	m.hasInterruptedBlock = false
+	m.interruptedBlockIdx = 0
+}
+
 // handleNewSession saves the current session (if any), creates a fresh one,
 // resets the runtime, and clears the transcript.
 func (m *Model) handleNewSession() (tea.Model, tea.Cmd) {
@@ -77,6 +89,7 @@ func (m *Model) handleNewSession() (tea.Model, tea.Cmd) {
 	}
 	m.saveCurrentSession()
 	m.cancelPendingSessionFlush()
+	m.clearInterruptState()
 	m.currentSession = m.sessions.Create("new session")
 	if m.runtime != nil {
 		m.runtime.SetMessages(nil)
@@ -149,6 +162,7 @@ func (m *Model) handleArchiveSession() (tea.Model, tea.Cmd) {
 
 	archivedTitle := m.currentSession.Title
 	m.cancelPendingSessionFlush()
+	m.clearInterruptState()
 	m.currentSession = m.sessions.Create("new session")
 	if m.runtime != nil {
 		m.runtime.SetMessages(nil)
@@ -183,6 +197,7 @@ func (m *Model) handleForkSession() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.currentSession = fork
+	m.clearInterruptState()
 	if m.runtime != nil {
 		m.runtime.SetMessages(fork.Messages)
 		m.runtime.SetContextTokens(0)
@@ -222,8 +237,22 @@ func (m *Model) saveCurrentSession() {
 //
 // The store is cleared too, so switching conversations cannot resurrect it.
 func (m *Model) startNewTurn(_ string) {
-	m.todos = ""
-	m.todosCollapsed = false
+	m.startNewTurnWith(false)
+}
+
+// startNewTurnKeepingTodos starts a continuation turn: the task list belongs to
+// the interrupted run and is what the model needs in order to continue, so it is
+// kept in memory and in the store. This is the one deliberate exception to
+// clearing the list at the turn boundary; tests pin both behaviours.
+func (m *Model) startNewTurnKeepingTodos(_ string) {
+	m.startNewTurnWith(true)
+}
+
+func (m *Model) startNewTurnWith(keepTodos bool) {
+	if !keepTodos {
+		m.todos = ""
+		m.todosCollapsed = false
+	}
 	// A new turn means a new assistant message, so the streaming render cache
 	// from the previous message must not survive into it.
 	m.streamCache = nil
@@ -231,7 +260,7 @@ func (m *Model) startNewTurn(_ string) {
 	// be stale once the transcript scrolls.
 	m.clearSelection()
 	m.invalidateFooter()
-	if m.sessions != nil && m.currentSession != nil {
+	if !keepTodos && m.sessions != nil && m.currentSession != nil {
 		_ = m.sessions.SaveTodos(m.currentSession.ID, "[]")
 	}
 }

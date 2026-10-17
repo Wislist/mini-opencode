@@ -388,3 +388,103 @@ func TestCacheWidthOscillation(t *testing.T) {
 		}
 	}
 }
+
+// ── Display-path caching ──────────────────────────────
+//
+// The raw-block cache still left two linear passes per frame: constraining the
+// joined output to the terminal width and applying the assistant style (which
+// wraps and pads every line). Both are line-local, so they can be cached per
+// block too. These tests pin the equivalence and the incremental behaviour.
+
+// displayReference is the pre-cache formula for a streamed message body:
+// constrain the whole render, then style it.
+func displayReference(text string, markdownWidth, contentWidth int) string {
+	return assistantText.Width(contentWidth).Render(renderAssistantMarkdownUncached(text, markdownWidth))
+}
+
+func TestRenderDisplayMatchesWholeTextStyling(t *testing.T) {
+	fragments := []string{
+		"hello ", "world\n\n", "# Heading\n", "\n", "- item\n", "```go\n", "code\n",
+		"```\n", "**bold** ", "| a | b |\n", "|---|---|\n", "> quote\n", "text\n",
+		"0123456789 ", "中文内容 ", "emoji 🎉 ", "   \n", "\t\n", "tail",
+	}
+	rng := rand.New(rand.NewSource(7))
+	for trial := 0; trial < 200; trial++ {
+		var sb strings.Builder
+		for i := 0; i < rng.Intn(10)+1; i++ {
+			sb.WriteString(fragments[rng.Intn(len(fragments))])
+		}
+		full := sb.String()
+		width := []int{30, 60, 100}[rng.Intn(3)]
+		contentWidth := width + 2
+
+		cache := newMarkdownRenderCache()
+		finalize := func(block string) string {
+			return assistantText.Width(contentWidth).Render(constrainMarkdownWidth(block, width))
+		}
+		for p := 0; p <= len(full); p++ {
+			got := cache.renderDisplay(full[:p], width, finalize)
+			want := displayReference(full[:p], width, contentWidth)
+			if got != want {
+				t.Fatalf("trial %d prefix %d width %d mismatch\n src: %q\n got: %q\nwant: %q",
+					trial, p, width, full[:p], got, want)
+			}
+		}
+	}
+}
+
+// TestRenderDisplayFinalizesOnlyTrailingBlock proves the remaining linear work
+// is gone: once the prefix has settled, a frame finalises the separator and the
+// growing tail, never the whole answer.
+func TestRenderDisplayFinalizesOnlyTrailingBlock(t *testing.T) {
+	width := 80
+	contentWidth := width + 2
+	var sb strings.Builder
+	for i := 0; i < 40; i++ {
+		sb.WriteString("Settled paragraph number ")
+		sb.WriteString(strings.Repeat("x", 200))
+		sb.WriteString("\n\n")
+	}
+	base := sb.String()
+
+	cache := newMarkdownRenderCache()
+	finalize := func(block string) string {
+		return assistantText.Width(contentWidth).Render(constrainMarkdownWidth(block, width))
+	}
+	cache.renderDisplay(base+"growing tail", width, finalize) // settle the prefix
+
+	for frame := 0; frame < 10; frame++ {
+		calls := 0
+		counted := func(block string) string {
+			calls++
+			return finalize(block)
+		}
+		got := cache.renderDisplay(base+"growing tail"+strings.Repeat("y", frame*50), width, counted)
+		want := displayReference(base+"growing tail"+strings.Repeat("y", frame*50), width, contentWidth)
+		if got != want {
+			t.Fatalf("frame %d mismatch", frame)
+		}
+		// One call for the separator and one for the tail.
+		if calls > 2 {
+			t.Fatalf("frame %d finalised %d blocks for a 40-paragraph message", frame, calls)
+		}
+	}
+}
+
+// TestStreamingMessageMatchesUncachedPipeline covers the model-level wiring:
+// renderStreamingMessage must produce exactly what the uncached pipeline does.
+func TestStreamingMessageMatchesUncachedPipeline(t *testing.T) {
+	m := perfStreamModel(6)
+	contentWidth := max(1, m.width-2)
+	markdownWidth := max(1, contentWidth-2)
+
+	text := m.streamingText
+	for p := 0; p <= len(text); p += 13 {
+		got := m.renderStreamingMessage(text[:p])
+		want := assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" +
+			displayReference(text[:p], markdownWidth, contentWidth)
+		if got != want {
+			t.Fatalf("prefix %d mismatch\n got: %q\nwant: %q", p, got, want)
+		}
+	}
+}

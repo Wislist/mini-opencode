@@ -473,6 +473,25 @@ func (r *Runtime) appendMessage(msg Message) {
 	r.messages = append(r.messages, msg)
 }
 
+// AppendInterruptedAssistant records the partial answer that had already been
+// streamed when the user interrupted the run.
+//
+// Without it the next request starts as if the model had said nothing, so a
+// user who stops a wrong answer and re-states the goal makes the model redo
+// work it had already done. The marker tells the model the text is incomplete;
+// empty content is ignored because it carries no information.
+func (r *Runtime) AppendInterruptedAssistant(content string) {
+	content = strings.TrimRight(content, "\n")
+	if strings.TrimSpace(content) == "" {
+		return
+	}
+	content += "\n\n[interrupted by user]"
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.messages = append(r.messages, Message{Role: RoleAssistant, Content: content})
+}
+
 // promptState returns the prompt pieces the provider request needs. Reading
 // them together keeps a turn self-consistent even if a UI goroutine loads
 // another session halfway through.

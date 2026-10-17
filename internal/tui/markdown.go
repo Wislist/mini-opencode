@@ -104,6 +104,11 @@ type cachedMarkdownBlock struct {
 	sourceText string
 	width      int
 	rendered   string
+	// display is the finalised form of rendered (width-constrained and styled),
+	// used by the streaming path so a repaint does not have to re-wrap the whole
+	// answer. hasDisplay distinguishes it from a block whose final form is empty.
+	display    string
+	hasDisplay bool
 }
 
 func newMarkdownRenderCache() *markdownRenderCache {
@@ -191,6 +196,115 @@ func (c *markdownRenderCache) renderInstrumented(text string, width int, onDocum
 // never treated as reusable by text comparison alone.
 func (e cachedMarkdownBlock) sourceTextEqual(block markdownBlock) bool {
 	return !block.isCode
+}
+
+// renderDisplay returns the final display form of text at width.
+//
+// It is the streaming path's counterpart to render: instead of joining the raw
+// rendered blocks and then constraining/styling the whole string, each block is
+// finalised on its own and the results are joined. Both operations are
+// line-local, so the output is byte-identical (markdown_cache_test.go asserts
+// it), but only the trailing block has to be finalised on a repaint. Finalising
+// the whole text each frame was the remaining linear cost: at ~46KB it spent
+// ~10ms of a 33ms frame in ansi.StringWidth alone.
+//
+// finalize must be line-local: it is called per block rather than on the joined
+// document.
+func (c *markdownRenderCache) renderDisplay(text string, width int, finalize func(string) string) string {
+	if width <= 0 {
+		return text
+	}
+	if c == nil {
+		return finalize(renderAssistantMarkdownUncached(text, width))
+	}
+
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	blocks := splitMarkdownBlocks(normalized)
+
+	if !strings.HasPrefix(normalized, c.source) && c.source != "" {
+		c.blocks = nil
+	}
+	c.source = normalized
+
+	if len(c.blocks) > len(blocks) {
+		c.blocks = c.blocks[:len(blocks)]
+	}
+
+	// The blank line between two blocks is styled too (the style pads every
+	// line), so it is built lazily: an empty document still has to go through
+	// finalize("") to match the whole-text pipeline, and that is cheaper than
+	// special-casing it at the call site.
+	var separator string
+	separatorBuilt := false
+
+	var sb strings.Builder
+	for i, block := range blocks {
+		// A block is settled once the stream has moved past it: it is a closed
+		// code fence, or a later block exists (its separating blank line arrived).
+		settled := block.isCode || i < len(blocks)-1
+
+		if i < len(c.blocks) {
+			entry := c.blocks[i]
+			if entry.width == width && entry.sourceText == block.text &&
+				entry.sourceTextEqual(block) && settled && entry.hasDisplay {
+				if entry.display != "" {
+					if sb.Len() > 0 {
+						if !separatorBuilt {
+							separator = "\n" + finalize("") + "\n"
+							separatorBuilt = true
+						}
+						sb.WriteString(separator)
+					}
+					sb.WriteString(entry.display)
+				}
+				continue
+			}
+		}
+
+		var part string
+		if block.isCode {
+			part = renderMarkdownCodeBlock(block.language, block.code, width)
+		} else {
+			part = renderMarkdownDocument(block.text, width)
+		}
+		part = strings.Trim(part, "\n")
+		if part == "" {
+			continue
+		}
+		display := finalize(part)
+
+		// Only settled blocks are worth keeping: an unsettled block changes on
+		// the next frame, so caching it would allocate for no benefit.
+		if settled {
+			entry := cachedMarkdownBlock{
+				sourceText: block.text,
+				width:      width,
+				rendered:   part,
+				display:    display,
+				hasDisplay: true,
+			}
+			if i < len(c.blocks) {
+				c.blocks[i] = entry
+			} else {
+				c.blocks = append(c.blocks, entry)
+			}
+		}
+
+		if sb.Len() > 0 {
+			if !separatorBuilt {
+				separator = "\n" + finalize("") + "\n"
+				separatorBuilt = true
+			}
+			sb.WriteString(separator)
+		}
+		sb.WriteString(display)
+	}
+	if sb.Len() == 0 {
+		// Match the whole-text pipeline, which styles the empty document into a
+		// blank padded line.
+		return finalize("")
+	}
+	return sb.String()
 }
 
 func appendIfNonEmpty(list []string, part string) []string {

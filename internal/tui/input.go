@@ -13,6 +13,13 @@ import (
 const runtimeUnavailableMessage = "no runtime available. use /provider add to configure one, or /provider to switch."
 
 func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
+	// The previous run may still be unwinding after an interrupt. A second Run
+	// on the same runtime would interleave messages, so the input is queued and
+	// sent from runtimeDoneMsg once the runtime is free.
+	if m.runUnwinding && input != "/quit" && input != "/exit" && input != "quit" && input != "exit" {
+		m.pendingInput = input
+		return m, nil
+	}
 	switch {
 	case input == "/quit" || input == "/exit" || input == "quit" || input == "exit":
 		m.state = stateQuitting
@@ -67,22 +74,89 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.paused {
+		return m.handleContinuation(input)
+	}
+
+	m.lastUserGoal = input
 	m.addBlock(m.renderUserMessage(input))
 	return m.startRun(input)
 }
 
+// handleContinuation sends the message that follows an interrupted run.
+//
+// Continuing is not a fresh turn: the partial answer and the task list are
+// already in the runtime, and the goal may have been edited in place. The
+// transcript shows the user's own words; the note prepended to the request tells
+// the model that the previous run was interrupted and whether the goal changed.
+func (m *Model) handleContinuation(input string) (tea.Model, tea.Cmd) {
+	goal := strings.TrimSpace(m.lastUserGoal)
+	unchanged := goal != "" && strings.TrimSpace(input) == goal
+	sendText := m.continuationSendText(input)
+	if unchanged {
+		m.addBlock(toolArrow.Render("→ continue after interruption"))
+	} else {
+		m.addBlock(m.renderUserMessage(input))
+	}
+	m.lastUserGoal = input
+	m.paused = false
+	return m.startRunWith(sendText, true)
+}
+
+// continuationSendText describes a continuation to the model. It must be called
+// before lastUserGoal is updated to the new input.
+func (m *Model) continuationSendText(input string) string {
+	goal := strings.TrimSpace(m.lastUserGoal)
+	var send string
+	if goal != "" && strings.TrimSpace(input) == goal {
+		send = "[interrupted] The user paused the previous run and asked to continue with the same goal. " +
+			"Continue from where it stopped. Keep the existing task list and update it with todo_write as you make progress."
+	} else {
+		send = "[goal adjusted after interruption] " + input + "\n\n" +
+			"This replaces the goal of the interrupted run. Continue from where the previous run stopped, " +
+			"update the task list to match the adjusted goal, and do not repeat completed work."
+	}
+	if m.mode == ModePlan {
+		send = "You are in plan mode. Do not modify any files or execute commands. " +
+			"Analyze the request, inspect the codebase with read-only tools, and provide " +
+			"a detailed plan with suggestions only.\n\n" + send
+	}
+	return send
+}
+
 // startRun launches a runtime run for input, streaming events into the TUI.
 func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
-	m.state = stateRunning
-	m.input.Blur()
-	m.startNewTurn(input)
-
 	sendText := input
 	if m.mode == ModePlan {
 		sendText = "You are in plan mode. Do not modify any files or execute commands. " +
 			"Analyze the request, inspect the codebase with read-only tools, and provide " +
 			"a detailed plan with suggestions only.\n\n" + input
 	}
+	return m.startRunWith(sendText, false)
+}
+
+// startRunWith launches a run with the exact text to send. keepTodos is set for
+// continuations, which must resume the interrupted task list instead of
+// clearing it at the turn boundary.
+func (m *Model) startRunWith(sendText string, keepTodos bool) (tea.Model, tea.Cmd) {
+	m.state = stateRunning
+	m.paused = false
+	m.pendingInput = ""
+	// Keep the composer focused while the answer streams. Users draft their
+	// next message during a run, and a blurred textarea drops every key before
+	// the running-state handler can forward it. Focus also restarts the virtual
+	// cursor blink command.
+	focusCmd := m.input.Focus()
+	if keepTodos {
+		m.startNewTurnKeepingTodos(sendText)
+	} else {
+		m.startNewTurn(sendText)
+	}
+	// The new question may have been appended while the viewport still held the
+	// previous frame, and the user may have scrolled up to read history. Sending
+	// is the moment to pin the view to the newest content so the incoming answer
+	// follows instead of streaming off screen.
+	m.scrollToLatest()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.ctx = ctx
@@ -95,7 +169,7 @@ func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
 		m.program.Send(runtimeDoneMsg{err: err})
 	}()
 
-	return m, m.spinner.Tick
+	return m, tea.Batch(m.spinner.Tick, focusCmd)
 }
 
 // startDistill extracts durable memories from the conversation that just
@@ -231,6 +305,12 @@ func (m *Model) handleRuntimeEvent(event agent.Event) tea.Cmd {
 		if event.Delta == "" {
 			return nil
 		}
+		if m.runUnwinding {
+			// The user already paused this run and its visible partial answer
+			// was rendered then. Deltas still in flight must not resurrect the
+			// stream for a run that is being torn down.
+			return nil
+		}
 		// Accumulating the delta is cheap; rendering it is not. Appending here
 		// and rendering on a timer keeps a fast token stream from re-running
 		// the Markdown renderer (and re-laying out the transcript) once per
@@ -240,6 +320,32 @@ func (m *Model) handleRuntimeEvent(event agent.Event) tea.Cmd {
 		m.queueSessionFlush([]agent.Message{{Role: agent.RoleAssistant, Content: m.streamingText}})
 		return m.scheduleStreamRender()
 	case agent.EventAssistantResponse:
+		if m.runUnwinding {
+			// The turn completed just as the user interrupted. The runtime has
+			// already recorded the full answer, so it is authoritative: replace
+			// the partial render with it instead of showing both, and make sure
+			// runtimeDoneMsg does not append the partial a second time.
+			m.interruptedResponse = true
+			m.interruptedPartial = ""
+			m.cancelStreamRender()
+			if event.Message != nil && event.Message.Content != "" {
+				rendered := m.renderAssistantMessage(event.Message.Content)
+				if m.hasInterruptedBlock && m.interruptedBlockIdx >= 0 && m.interruptedBlockIdx < len(m.blocks) {
+					m.blocks[m.interruptedBlockIdx] = rendered
+					m.markBlocksChanged()
+				} else {
+					m.addBlock(rendered)
+				}
+			}
+			m.hasInterruptedBlock = false
+			m.interruptedBlockIdx = 0
+			m.streamingIdx = -1
+			m.streamingText = ""
+			m.streamCache = nil
+			m.saveCurrentSession()
+			m.refreshViewport()
+			return nil
+		}
 		wasStreaming := m.streamingIdx >= 0
 		// Any throttled frame still queued is now stale: the authoritative
 		// content below supersedes it, and letting the timer fire afterwards

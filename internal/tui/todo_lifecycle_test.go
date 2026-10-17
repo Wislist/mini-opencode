@@ -304,6 +304,85 @@ func TestClearedTodosSurviveSessionReload(t *testing.T) {
 	}
 }
 
+// TestRuntimeDoneReloadsPersistedTodos verifies that finishing a run reconciles
+// the panel with its session-backed source of truth. A delayed UI event (for
+// example while the terminal is inactive) must not leave an old incomplete
+// rendering on screen, and the final session save must not overwrite the
+// persisted completed list.
+func TestRuntimeDoneReloadsPersistedTodos(t *testing.T) {
+	m := todoTestModel(t)
+	store := newTestSessionStore(t, t.TempDir())
+	m.SetSessionStore(store)
+	m.currentSession = store.Create("t")
+	if err := store.Save(m.currentSession); err != nil {
+		t.Fatal(err)
+	}
+	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
+	m.todos = "[>] stale task\n[ ] another stale task\n(0/2 done)"
+
+	const completed = `[{"content":"first task","status":"completed"},{"content":"second task","status":"completed"}]`
+	if err := store.SaveTodos(m.currentSession.ID, completed); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, _ := m.Update(runtimeDoneMsg{})
+	m = updated.(*Model)
+
+	if strings.Contains(m.todos, "stale task") {
+		t.Fatalf("完成后仍显示旧 todo: %q", m.todos)
+	}
+	if !strings.Contains(m.todos, "[x] first task") || !strings.Contains(m.todos, "(2/2 done)") {
+		t.Fatalf("完成后没有加载已持久化的 todo: %q", m.todos)
+	}
+	if got := store.LoadTodos(m.currentSession.ID); got != completed {
+		t.Fatalf("结束保存覆盖了已持久化 todo:\ngot  %s\nwant %s", got, completed)
+	}
+}
+
+// TestRuntimeDoneClearsPanelForPersistedEmptyTodos covers a completed task
+// list that has been cleared by the authoritative store before the done event
+// reaches the TUI.
+func TestRuntimeDoneClearsPanelForPersistedEmptyTodos(t *testing.T) {
+	m := todoTestModel(t)
+	store := newTestSessionStore(t, t.TempDir())
+	m.SetSessionStore(store)
+	m.currentSession = store.Create("t")
+	if err := store.Save(m.currentSession); err != nil {
+		t.Fatal(err)
+	}
+	m.SetRuntime(agent.NewRuntime(agent.EchoProvider{}))
+	m.todos = "[>] stale task\n(0/1 done)"
+
+	if err := store.SaveTodos(m.currentSession.ID, "[]"); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, _ := m.Update(runtimeDoneMsg{})
+	m = updated.(*Model)
+
+	if m.todos != "" {
+		t.Fatalf("持久化列表为空后面板仍未清除: %q", m.todos)
+	}
+	if panel := m.renderTodoPanel(); panel != "" {
+		t.Fatalf("持久化列表为空后仍渲染面板: %q", panel)
+	}
+}
+
+// TestRuntimeDoneWithoutSessionKeepsInMemoryTodos ensures the reconciliation
+// only runs when a session store and active session provide an authoritative
+// value. Test-only models and configuration failures must not erase the panel.
+func TestRuntimeDoneWithoutSessionKeepsInMemoryTodos(t *testing.T) {
+	m := todoTestModel(t)
+	m.todos = "[>] active task\n(0/1 done)"
+
+	updated, _ := m.Update(runtimeDoneMsg{})
+	m = updated.(*Model)
+
+	if !strings.Contains(m.todos, "active task") {
+		t.Fatalf("没有会话存储时意外清除了 todo: %q", m.todos)
+	}
+}
+
 // ── 边界 ───────────────────────────────────────────────────────────
 
 func TestTodoCollapseBoundaries(t *testing.T) {

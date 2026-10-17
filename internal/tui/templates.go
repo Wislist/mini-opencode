@@ -34,3 +34,32 @@ func firstUserMessage(messages []agent.Message) string {
 	}
 	return ""
 }
+
+// lastUserMessage returns the newest real user instruction, unwrapping the
+// notes the UI adds (plan-mode preamble, goal-adjustment marker) so an
+// interrupted run can prefill the goal the user actually typed.
+func lastUserMessage(messages []agent.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role != agent.RoleUser {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if content == "" || strings.Contains(content, "<conversation_summary>") || agent.IsTodoContinuationText(content) {
+			continue
+		}
+		if strings.HasPrefix(content, "[goal adjusted after interruption] ") {
+			content = strings.TrimPrefix(content, "[goal adjusted after interruption] ")
+			if idx := strings.Index(content, "\n\n"); idx >= 0 {
+				content = content[:idx]
+			}
+		}
+		if strings.Contains(content, "You are in plan mode") {
+			if idx := strings.Index(content, "\n\n"); idx >= 0 {
+				content = content[idx+2:]
+			}
+		}
+		return strings.TrimSpace(content)
+	}
+	return ""
+}

@@ -97,6 +97,11 @@ type compactDoneMsg struct {
 	err         error
 }
 
+// flushPendingInputMsg asks the update loop to send the message that was
+// submitted while the previous run was still unwinding. Deferring it through a
+// message keeps the send on the update goroutine, where model mutation is safe.
+type flushPendingInputMsg struct{}
+
 // sessionTitleMsg carries an asynchronously generated session title.
 type sessionTitleMsg struct {
 	title string
@@ -160,6 +165,29 @@ type Model struct {
 	// the unsettled tail instead of the whole accumulated answer. It is reset
 	// whenever the streamed text no longer extends the previous frame's text.
 	streamCache *markdownRenderCache
+	// paused marks a run the user interrupted. The partial answer and task list
+	// are retained until the next message continues the work.
+	paused bool
+	// runUnwinding is true between the interrupt and runtimeDoneMsg: the
+	// previous Run has not returned yet, so a second one must not start.
+	runUnwinding bool
+	// pendingInput holds a message submitted while the old run was unwinding;
+	// it is flushed once runtimeDoneMsg settles.
+	pendingInput string
+	// interruptedPartial is the streamed text captured at the interrupt. It is
+	// committed to the runtime only after runtimeDoneMsg, so a complete
+	// response that arrived just before cancellation is not duplicated.
+	interruptedPartial string
+	// interruptedResponse records that a complete response arrived after the
+	// interrupt; the partial is then discarded.
+	interruptedResponse bool
+	// interruptedBlockIdx locates the rendered partial so a late complete
+	// response can replace it instead of rendering the answer twice.
+	interruptedBlockIdx int
+	hasInterruptedBlock bool
+	// lastUserGoal is the raw text of the most recent user message, used to
+	// prefill the composer after an interrupt.
+	lastUserGoal string
 
 	gitStatus GitStatus
 
@@ -642,15 +670,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case runtimeDoneMsg:
+		interrupted := m.runUnwinding
+		m.runUnwinding = false
 		m.state = stateIdle
-		if msg.err != nil {
+		if msg.err != nil && !interrupted {
 			m.addBlock(errorStyle.Render("✗ " + msg.err.Error()))
+		}
+		if interrupted {
+			// The user paused this run. Keep what the model had streamed: the
+			// next request then continues from that point instead of redoing
+			// work. A complete response that arrived after the interrupt is
+			// authoritative and already recorded, so the partial is dropped.
+			if !m.interruptedResponse && strings.TrimSpace(m.interruptedPartial) != "" && m.runtime != nil {
+				m.runtime.AppendInterruptedAssistant(m.interruptedPartial)
+			}
+			m.interruptedPartial = ""
+			m.interruptedResponse = false
+			m.hasInterruptedBlock = false
+			m.interruptedBlockIdx = 0
+			m.paused = true
 		}
 		if m.systemPromptRestore != "" && m.runtime != nil {
 			// /init runs with a different system prompt; put the normal one
 			// back as soon as that run is over.
 			m.runtime.SetSystemPrompt(m.systemPromptRestore)
 			m.systemPromptRestore = ""
+		}
+		if m.sessions != nil && m.currentSession != nil {
+			m.currentSession.Todos = m.sessions.LoadTodos(m.currentSession.ID)
+			m.todos = todoTextFromJSON(m.currentSession.Todos)
 		}
 		m.saveCurrentSession()
 		if cmd := m.maybeGenerateTitle(); cmd != nil {
@@ -659,7 +707,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Extract durable memories in the background once the run is over.
 		// This is intentionally after the UI is already idle: extraction must
 		// never delay the answer the user just waited for.
-		if msg.err == nil {
+		if msg.err == nil && !interrupted {
 			if cmd := m.startDistill(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -667,7 +715,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gitStatus = collectGitStatus(m.workingDir)
 		m.refreshViewport()
 		m.input.Focus()
+		// A draft typed during the run may start with "/". Now that the state
+		// is idle again, open the completion menu for it without waiting for
+		// the next keystroke.
+		m.updateCommandMenu()
 		cmds = append(cmds, textinput.Blink)
+		if m.pendingInput != "" {
+			// A message was submitted while the old run was unwinding. Send it
+			// from the update goroutine once the runtime is free.
+			cmds = append(cmds, func() tea.Msg { return flushPendingInputMsg{} })
+		}
+
+	case flushPendingInputMsg:
+		pending := m.pendingInput
+		m.pendingInput = ""
+		if pending == "" {
+			return m, nil
+		}
+		return m.handleInput(pending)
 
 	case memoryDistilledMsg:
 		// Extraction is a background implementation detail. Success and failure
@@ -721,6 +786,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addBlock(errorStyle.Render("✗ switch session: " + msg.err.Error()))
 		} else if msg.sess != nil {
 			m.currentSession = msg.sess
+			m.clearInterruptState()
 			if m.runtime != nil {
 				m.runtime.SetMessages(msg.sess.Messages)
 				m.runtime.SetContextTokens(0)
@@ -903,6 +969,16 @@ func (m *Model) refreshViewport() {
 	if follow {
 		m.viewport.GotoBottom()
 	}
+}
+
+// scrollToLatest syncs the transcript and pins the view to the newest content.
+//
+// Sending a message is an explicit "show me what happens next", so it overrides
+// the usual follow-only-when-already-at-bottom rule: the question the user just
+// asked must be on screen, and the answer that follows must track it.
+func (m *Model) scrollToLatest() {
+	m.refreshViewport()
+	m.viewport.GotoBottom()
 }
 
 // rebuildViewport rewrites the viewport from the current blocks.

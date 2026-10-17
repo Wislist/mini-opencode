@@ -58,10 +58,13 @@ func (m *Model) renderFrame() string {
 	// everything around a viewport that draws nothing, pushing the input box off
 	// the frame. Rendering is the one place that guarantees the content is in
 	// place regardless of who called View.
-	if m.transcriptDirty {
-		m.transcriptDirty = false
-		m.syncViewportLines()
-	}
+	//
+	// Follow must be decided BEFORE the new content is pushed in: the answer to
+	// "was the user at the bottom?" has to describe the frame they were looking
+	// at. Checking after SetContentLines makes an append look like the user had
+	// scrolled up, which is exactly why a question sent after a completed answer
+	// stopped auto-scrolling for the whole new turn.
+	m.refreshViewport()
 
 	header := m.renderHeader()
 	footer := m.renderFooter()
@@ -427,6 +430,16 @@ func (m *Model) renderPermissionPrompt() string {
 }
 
 func (m *Model) renderHelpBar() string {
+	if m.paused {
+		// Paused is the user-visible state even if a stale caller has not yet
+		// settled stateRunning. Keep the hint bounded after display-width
+		// measurement so narrow terminals never wrap the footer.
+		hint := "⏸ paused · edit the goal, enter to continue"
+		if m.width > 0 {
+			hint = truncateTitleToWidth(hint, m.width)
+		}
+		return dimStyle.Render(hint)
+	}
 	if m.state == stateRunning {
 		// Advertise the fold while running: that is when the task panel is most
 		// likely to be in the way.
@@ -504,8 +517,14 @@ func (m *Model) renderStreamingMessage(text string) string {
 	if m.streamCache == nil {
 		m.streamCache = newMarkdownRenderCache()
 	}
-	rendered := m.streamCache.render(text, mdWidth)
-	return assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" + assistantText.Width(contentWidth).Render(rendered)
+	// Finalise each block on its own: constrain it to the markdown width, then
+	// apply the assistant padding. Only the trailing block is re-finalised on a
+	// repaint, so the cost of a frame tracks the text still arriving rather than
+	// the length of the whole answer.
+	rendered := m.streamCache.renderDisplay(text, mdWidth, func(block string) string {
+		return assistantText.Width(contentWidth).Render(constrainMarkdownWidth(block, mdWidth))
+	})
+	return assistantLabel.Render("◂ "+m.cfg.Assistant) + "\n" + rendered
 }
 
 // toolCallMaxRows bounds how many rows a tool call may show.

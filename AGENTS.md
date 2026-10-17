@@ -32,6 +32,26 @@ Windows PowerShell 使用 `./scripts/build.ps1` 构建带 git 版本号的
 npm/pnpm 分发使用 `npm/` 下的 Node 启动器和四个按平台拆分的原生包；运行
 `cd npm && npm test` 验证包装器，tag 发布流程见 `.github/workflows/npm-release.yml`。
 
+### npm 启动器的更新提示
+
+`npm/lib/update.js` 让 npm 安装能感知新版本（原生二进制不知道自己怎么装进来的，Node
+外壳可以）。要点：
+
+- 版本比较对象是**包装器自己的 `package.json`**，对照 registry 的 `latest` dist-tag，
+  不是 `internal/app` 的基线常量。
+- **任何失败都不阻塞启动**：检查有 1500ms 超时、`AbortController`，网络/JSON 错误一律
+  降级为「安静启动」，`run()` 外层还兜一个 try/catch。
+- **只在交互终端检查**（`stdin.isTTY && stdout.isTTY`），管道输入不采样网络；`CI`、
+  `NO_UPDATE_NOTIFIER`、`MINI_OPENCODE_NO_UPDATE_CHECK` 任一为真即完全关闭。
+- 结果缓存在 `~/.mini-opencode/update-check.json`：24h 内不重复联网（无论成功失败都记
+  时间戳，避免离线时每次启动都重试），用户选 No 时额外记 `declinedVersion`，同一版本
+  不再追问；更新更高的版本会重新提示。
+- 开发/占位版本（`0.0.0*`、带 prerelease）**不提示**，否则仓库内直接跑会永远报有更新。
+- 安装命令按 `npm_config_user_agent`（脚本内调用）或安装路径里的 `pnpm` 段
+  （`PNPM_HOME`）选择 npm / pnpm / yarn 的全局安装形式；更新成功后照常启动（`main` 在
+  spawn 时才解析二进制路径，所以拿到的是新版本）。
+- `bin/mini-opencode.js` 调的是异步 `run()`；`main()` 保持同步语义不变，测试仍直接调它。
+
 `go build ./...` 依然可用，Makefile 与 PowerShell 脚本只是把重复动作固化下来。
 CI 同时覆盖 macOS 与 Windows。以 go.mod 声明的 Go 版本为准。
 
@@ -226,7 +246,14 @@ plan 模式的提示注入。发现性靠：输入 `/` 拉起补全菜单 + 底�
      esc 中断、切会话）整份缓存作废——否则会把更早那条消息的渲染留在屏幕上。
   2. **stream 结束（`EventAssistantResponse`）与 `startNewTurn` 必须把 `streamCache` 置 nil**，
      避免跨消息复用。
-     实测重绘成本：120 段文本 4.29ms → **0.87ms**（5×），分配 35.7k → 1.9k。
+  3. 缓存分两级：`render()` 只缓存 Glamour 原始输出；`renderDisplay()` 连**按块做宽度约束
+     和 lipgloss 样式化**的结果一起缓存（`renderStreamingMessage` 走后者）。这两个操作都是
+     **逐行局部**的，所以按块做与整篇做的输出逐字节相同；把整篇再处理一遍会让每帧成本随答案
+     长度线性增长（46KB 时 ~10ms/帧都花在 `ansi.StringWidth` 上）。
+     新增按块缓存的后处理时，必须同时满足「逐行局部」并在 `markdown_cache_test.go` 里加
+     整篇对照断言。
+     实测重绘成本：120 段 5.4KB 4.29ms → **0.22ms**，分配 35.7k → 3.5k；1000 段 46KB
+     12.2ms → **0.39ms**（缓存正文渲染本身）。
 - **`splitMarkdownBlocks` 按空行切块，但必须让列表粘住**。之前只按 code fence 切，整篇
   散文就是一个块，缓存无从谈起。按空行切之后有一个坑：CommonMark 里 `- a\n- b\n\n- c`
   是**同一个 loose list**，切开会让 bullet 断成两段并多出一个空行；列表紧跟在段落/标题

@@ -218,30 +218,99 @@ func (m *Model) handleIdleKeyForOS(msg tea.KeyMsg, goos string) (tea.Model, tea.
 func (m *Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		m.clearSelection()
-		if m.cancel != nil {
-			m.cancel()
-		}
-		m.state = stateIdle
-		m.streamingIdx = -1
-		m.streamingText = ""
-		m.addBlock(errorStyle.Render("✗ interrupted"))
-		m.refreshViewport()
-		return m, textinput.Blink
+		return m.interruptRun()
 	case "up":
 		m.scrollLines(-keyScrollLines)
 	case "down":
 		m.scrollLines(keyScrollLines)
+	case "pgup":
+		m.viewport.HalfPageUp()
+	case "pgdown":
+		m.viewport.HalfPageDown()
 	case "ctrl+t":
 		// The panel is most likely to be in the way while the agent is working,
 		// so folding is available during a run too.
 		m.toggleTodos()
+	case "enter", "ctrl+m":
+		// The running turn still owns the runtime, so Enter must not start
+		// another one. The draft stays in the composer and is sent once the
+		// run finishes.
+		return m, nil
+	case "tab", "shift+tab", "ctrl+d":
+		// Application-level keys keep their idle meaning (mode / quit) rather
+		// than being inserted as text by the textarea.
+		return m, nil
 	case "ctrl+j", "shift+enter", "alt+enter":
 		// Drafting the next message while the agent works is a normal thing to
 		// do, so the newline keys stay live during a run.
 		m.insertNewline()
+		return m, nil
 	}
-	return m, nil
+	// Everything else is ordinary editing. Forwarding it keeps the composer
+	// usable while the answer streams; dropping it here was why typing (and
+	// especially Chinese IME commits) appeared to be swallowed during a run.
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	m.syncInputHeight()
+	return m, cmd
+}
+
+// interruptRun pauses the active run instead of treating it as a failure.
+//
+// The partial answer is kept (visually and, once the run has unwound, in the
+// runtime transcript) and the task list is preserved, so the next message can
+// adjust the goal and continue from here. The model never receives a second
+// concurrent Run: runUnwinding keeps new sends queued until runtimeDoneMsg.
+func (m *Model) interruptRun() (tea.Model, tea.Cmd) {
+	m.clearSelection()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	// The throttled repaint is stale now; render the authoritative partial once
+	// so no already-streamed token is lost from the screen.
+	m.cancelStreamRender()
+
+	partial := m.streamingText
+	if partial != "" {
+		rendered := m.renderStreamingMessage(partial)
+		if m.streamingIdx >= 0 && m.streamingIdx < len(m.blocks) {
+			m.blocks[m.streamingIdx] = rendered
+			m.interruptedBlockIdx = m.streamingIdx
+		} else {
+			m.addBlock(rendered)
+			m.interruptedBlockIdx = len(m.blocks) - 1
+		}
+		m.hasInterruptedBlock = true
+		m.markBlocksChanged()
+	}
+
+	m.interruptedPartial = partial
+	m.interruptedResponse = false
+	m.streamCache = nil
+	m.streamingIdx = -1
+	m.streamingText = ""
+
+	m.state = stateIdle
+	m.paused = true
+	m.runUnwinding = true
+
+	// Prefill the goal so the user can edit it rather than retype it. A draft
+	// typed while the answer streamed is more specific than the old goal and
+	// must never be overwritten.
+	if m.lastUserGoal == "" && m.runtime != nil {
+		// A session loaded from disk has no send-time goal recorded; recover it
+		// from the transcript instead of leaving the composer empty.
+		m.lastUserGoal = lastUserMessage(m.runtime.Messages())
+	}
+	if strings.TrimSpace(m.input.Value()) == "" && m.lastUserGoal != "" {
+		m.input.SetValue(m.lastUserGoal)
+		m.input.CursorEnd()
+		m.syncInputHeight()
+	}
+	m.updateCommandMenu()
+	m.invalidateFooter()
+	m.refreshViewport()
+	return m, textinput.Blink
 }
 
 func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

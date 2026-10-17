@@ -52,7 +52,17 @@ func TestEscInterruptsRunningAndCompacting(t *testing.T) {
 				if got.state != stateIdle {
 					t.Fatalf("state = %v, want stateIdle", got.state)
 				}
-				if !strings.Contains(plainText(strings.Join(got.blocks, "\n")), "interrupted") {
+				if tc.state == stateRunning {
+					// Interrupting a run pauses it so the answer and the task
+					// list can be continued; the pause is announced in the
+					// help bar rather than as a transcript error.
+					if !got.paused {
+						t.Fatal("running interrupt did not pause the run")
+					}
+					if !strings.Contains(plainText(got.renderHelpBar()), "paused") {
+						t.Fatalf("no pause hint in the help bar: %q", plainText(got.renderHelpBar()))
+					}
+				} else if !strings.Contains(plainText(strings.Join(got.blocks, "\n")), "interrupted") {
 					t.Fatalf("no interrupt notice in transcript: %q", got.blocks)
 				}
 			})
