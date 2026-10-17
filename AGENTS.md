@@ -246,7 +246,14 @@ plan 模式的提示注入。发现性靠：输入 `/` 拉起补全菜单 + 底�
      esc 中断、切会话）整份缓存作废——否则会把更早那条消息的渲染留在屏幕上。
   2. **stream 结束（`EventAssistantResponse`）与 `startNewTurn` 必须把 `streamCache` 置 nil**，
      避免跨消息复用。
-     实测重绘成本：120 段文本 4.29ms → **0.87ms**（5×），分配 35.7k → 1.9k。
+  3. 缓存分两级：`render()` 只缓存 Glamour 原始输出；`renderDisplay()` 连**按块做宽度约束
+     和 lipgloss 样式化**的结果一起缓存（`renderStreamingMessage` 走后者）。这两个操作都是
+     **逐行局部**的，所以按块做与整篇做的输出逐字节相同；把整篇再处理一遍会让每帧成本随答案
+     长度线性增长（46KB 时 ~10ms/帧都花在 `ansi.StringWidth` 上）。
+     新增按块缓存的后处理时，必须同时满足「逐行局部」并在 `markdown_cache_test.go` 里加
+     整篇对照断言。
+     实测重绘成本：120 段 5.4KB 4.29ms → **0.22ms**，分配 35.7k → 3.5k；1000 段 46KB
+     12.2ms → **0.39ms**（缓存正文渲染本身）。
 - **`splitMarkdownBlocks` 按空行切块，但必须让列表粘住**。之前只按 code fence 切，整篇
   散文就是一个块，缓存无从谈起。按空行切之后有一个坑：CommonMark 里 `- a\n- b\n\n- c`
   是**同一个 loose list**，切开会让 bullet 断成两段并多出一个空行；列表紧跟在段落/标题
