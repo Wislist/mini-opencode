@@ -652,6 +652,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.runtime.SetSystemPrompt(m.systemPromptRestore)
 			m.systemPromptRestore = ""
 		}
+		if m.sessions != nil && m.currentSession != nil {
+			m.currentSession.Todos = m.sessions.LoadTodos(m.currentSession.ID)
+			m.todos = todoTextFromJSON(m.currentSession.Todos)
+		}
 		m.saveCurrentSession()
 		if cmd := m.maybeGenerateTitle(); cmd != nil {
 			cmds = append(cmds, cmd)
