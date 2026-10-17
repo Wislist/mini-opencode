@@ -32,6 +32,26 @@ Windows PowerShell 使用 `./scripts/build.ps1` 构建带 git 版本号的
 npm/pnpm 分发使用 `npm/` 下的 Node 启动器和四个按平台拆分的原生包；运行
 `cd npm && npm test` 验证包装器，tag 发布流程见 `.github/workflows/npm-release.yml`。
 
+### npm 启动器的更新提示
+
+`npm/lib/update.js` 让 npm 安装能感知新版本（原生二进制不知道自己怎么装进来的，Node
+外壳可以）。要点：
+
+- 版本比较对象是**包装器自己的 `package.json`**，对照 registry 的 `latest` dist-tag，
+  不是 `internal/app` 的基线常量。
+- **任何失败都不阻塞启动**：检查有 1500ms 超时、`AbortController`，网络/JSON 错误一律
+  降级为「安静启动」，`run()` 外层还兜一个 try/catch。
+- **只在交互终端检查**（`stdin.isTTY && stdout.isTTY`），管道输入不采样网络；`CI`、
+  `NO_UPDATE_NOTIFIER`、`MINI_OPENCODE_NO_UPDATE_CHECK` 任一为真即完全关闭。
+- 结果缓存在 `~/.mini-opencode/update-check.json`：24h 内不重复联网（无论成功失败都记
+  时间戳，避免离线时每次启动都重试），用户选 No 时额外记 `declinedVersion`，同一版本
+  不再追问；更新更高的版本会重新提示。
+- 开发/占位版本（`0.0.0*`、带 prerelease）**不提示**，否则仓库内直接跑会永远报有更新。
+- 安装命令按 `npm_config_user_agent`（脚本内调用）或安装路径里的 `pnpm` 段
+  （`PNPM_HOME`）选择 npm / pnpm / yarn 的全局安装形式；更新成功后照常启动（`main` 在
+  spawn 时才解析二进制路径，所以拿到的是新版本）。
+- `bin/mini-opencode.js` 调的是异步 `run()`；`main()` 保持同步语义不变，测试仍直接调它。
+
 `go build ./...` 依然可用，Makefile 与 PowerShell 脚本只是把重复动作固化下来。
 CI 同时覆盖 macOS 与 Windows。以 go.mod 声明的 Go 版本为准。
 

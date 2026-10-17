@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
-const { main } = require("../lib/cli");
+const { run } = require("../lib/cli");
 
-try {
-  process.exitCode = main(process.argv.slice(2));
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`mini-opencode: ${message}`);
-  process.exitCode = 1;
-}
+run(process.argv.slice(2))
+  .then((code) => {
+    process.exitCode = code;
+  })
+  .catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`mini-opencode: ${message}`);
+    process.exitCode = 1;
+  });

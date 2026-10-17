@@ -31,6 +31,8 @@ test("prepareRelease generates publishable platform and wrapper packages", async
   assert.equal(wrapper.private, undefined);
   assert.deepEqual(Object.keys(wrapper.optionalDependencies).sort(), packageDefinitions.map((item) => item.packageName).sort());
   assert.ok(Object.values(wrapper.optionalDependencies).every((version) => version === "1.2.3"));
+  // The published wrapper must ship the update shim it requires at runtime.
+  assert.match(await readFile(path.join(output, "wrapper", "lib", "update.js"), "utf8"), /checkForUpdate/);
 
   for (const definition of packageDefinitions) {
     const packageDir = path.join(output, definition.directory);
