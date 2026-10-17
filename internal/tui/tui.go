@@ -671,6 +671,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gitStatus = collectGitStatus(m.workingDir)
 		m.refreshViewport()
 		m.input.Focus()
+		// A draft typed during the run may start with "/". Now that the state
+		// is idle again, open the completion menu for it without waiting for
+		// the next keystroke.
+		m.updateCommandMenu()
 		cmds = append(cmds, textinput.Blink)
 
 	case memoryDistilledMsg:
@@ -907,6 +911,16 @@ func (m *Model) refreshViewport() {
 	if follow {
 		m.viewport.GotoBottom()
 	}
+}
+
+// scrollToLatest syncs the transcript and pins the view to the newest content.
+//
+// Sending a message is an explicit "show me what happens next", so it overrides
+// the usual follow-only-when-already-at-bottom rule: the question the user just
+// asked must be on screen, and the answer that follows must track it.
+func (m *Model) scrollToLatest() {
+	m.refreshViewport()
+	m.viewport.GotoBottom()
 }
 
 // rebuildViewport rewrites the viewport from the current blocks.

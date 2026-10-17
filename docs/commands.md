@@ -45,7 +45,7 @@ session picker.
 | `↑` `↓` `enter` `esc` | Drive the `/permissions` picker. |
 | `shift+enter` | Insert a newline in the prompt box. |
 | `ctrl+j` / `alt+enter` | Insert a newline too; fallbacks for terminals without the kitty keyboard protocol. |
-| `enter` | Send the message. |
+| `enter` | Send the message; while a run is in progress, keep the draft for after it ends. |
 | `↑` `↓` / wheel | Scroll the transcript. |
 | drag (left button) | Select text; releasing copies it to the system clipboard. |
 | click (no drag) | Clear the selection. |
@@ -111,6 +111,13 @@ scripts and muscle memory — the picker is an addition, not a replacement.
 The prompt box grows with its content, up to six lines, and wraps long lines
 automatically. `enter` sends; `ctrl+j` and `alt+enter` insert a newline.
 
+The composer stays focused and editable while an answer is still streaming, so
+the next message can be drafted during a run. `enter` does not start another
+turn then: the draft is kept and sent once the run finishes. The real terminal
+cursor follows the composer during the run as well, which keeps IME pre-edit
+text (for example Chinese input) inside the input box instead of on the help
+bar; without it, committed characters could appear to be swallowed.
+
 `shift+enter` inserts a newline, which requires the terminal to disambiguate
 modified keys. Bubble Tea v2 negotiates the kitty keyboard protocol for this and
 reports the result as `KeyboardEnhancementsMsg`; when the terminal supports it,
@@ -120,6 +127,13 @@ bytes that work regardless, so a newline is always reachable.
 
 The upgrade to Bubble Tea v2 was required for this: v1's key type had no shift
 field at all, so `shift+enter` and `enter` were literally the same value.
+
+### Scrolling
+
+The transcript follows new output only while the view is already at the bottom,
+so scrolling up to read history is not interrupted by a streaming answer. Send a
+message and the view returns to the newest content: the question just asked and
+the answer that follows are always on screen.
 
 ### Selecting and copying text
 

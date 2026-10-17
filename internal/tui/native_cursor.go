@@ -41,7 +41,14 @@ func (m *Model) computeNativeCursorPosition(header string, footer []string) (col
 	baseRow := lipgloss.Height(header) + m.viewport.Height()
 
 	switch m.state {
-	case stateIdle:
+	case stateIdle, stateRunning:
+		// The composer stays editable during a run, so the real cursor must be
+		// parked there too. Otherwise IME pre-edit text is drawn on the help
+		// bar at the bottom of the frame and committed characters appear to be
+		// swallowed.
+		if !m.input.Focused() {
+			return 0, 0, false
+		}
 		// Count the panel above the input from the shared footer layout. The
 		// panel is not always the command menu: the todo panel takes its place
 		// when the menu is closed, and treating footer[0] as the menu pushed

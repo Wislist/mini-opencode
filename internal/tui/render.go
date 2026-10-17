@@ -58,10 +58,13 @@ func (m *Model) renderFrame() string {
 	// everything around a viewport that draws nothing, pushing the input box off
 	// the frame. Rendering is the one place that guarantees the content is in
 	// place regardless of who called View.
-	if m.transcriptDirty {
-		m.transcriptDirty = false
-		m.syncViewportLines()
-	}
+	//
+	// Follow must be decided BEFORE the new content is pushed in: the answer to
+	// "was the user at the bottom?" has to describe the frame they were looking
+	// at. Checking after SetContentLines makes an append look like the user had
+	// scrolled up, which is exactly why a question sent after a completed answer
+	// stopped auto-scrolling for the whole new turn.
+	m.refreshViewport()
 
 	header := m.renderHeader()
 	footer := m.renderFooter()

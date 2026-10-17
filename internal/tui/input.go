@@ -74,8 +74,17 @@ func (m *Model) handleInput(input string) (tea.Model, tea.Cmd) {
 // startRun launches a runtime run for input, streaming events into the TUI.
 func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
 	m.state = stateRunning
-	m.input.Blur()
+	// Keep the composer focused while the answer streams. Users draft their
+	// next message during a run, and a blurred textarea drops every key before
+	// the running-state handler can forward it. Focus also restarts the virtual
+	// cursor blink command.
+	focusCmd := m.input.Focus()
 	m.startNewTurn(input)
+	// The new question may have been appended while the viewport still held the
+	// previous frame, and the user may have scrolled up to read history. Sending
+	// is the moment to pin the view to the newest content so the incoming answer
+	// follows instead of streaming off screen.
+	m.scrollToLatest()
 
 	sendText := input
 	if m.mode == ModePlan {
@@ -95,7 +104,7 @@ func (m *Model) startRun(input string) (tea.Model, tea.Cmd) {
 		m.program.Send(runtimeDoneMsg{err: err})
 	}()
 
-	return m, m.spinner.Tick
+	return m, tea.Batch(m.spinner.Tick, focusCmd)
 }
 
 // startDistill extracts durable memories from the conversation that just

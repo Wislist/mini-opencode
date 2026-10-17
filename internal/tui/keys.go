@@ -232,16 +232,36 @@ func (m *Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollLines(-keyScrollLines)
 	case "down":
 		m.scrollLines(keyScrollLines)
+	case "pgup":
+		m.viewport.HalfPageUp()
+	case "pgdown":
+		m.viewport.HalfPageDown()
 	case "ctrl+t":
 		// The panel is most likely to be in the way while the agent is working,
 		// so folding is available during a run too.
 		m.toggleTodos()
+	case "enter", "ctrl+m":
+		// The running turn still owns the runtime, so Enter must not start
+		// another one. The draft stays in the composer and is sent once the
+		// run finishes.
+		return m, nil
+	case "tab", "shift+tab", "ctrl+d":
+		// Application-level keys keep their idle meaning (mode / quit) rather
+		// than being inserted as text by the textarea.
+		return m, nil
 	case "ctrl+j", "shift+enter", "alt+enter":
 		// Drafting the next message while the agent works is a normal thing to
 		// do, so the newline keys stay live during a run.
 		m.insertNewline()
+		return m, nil
 	}
-	return m, nil
+	// Everything else is ordinary editing. Forwarding it keeps the composer
+	// usable while the answer streams; dropping it here was why typing (and
+	// especially Chinese IME commits) appeared to be swallowed during a run.
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	m.syncInputHeight()
+	return m, cmd
 }
 
 func (m *Model) handleCompactingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
